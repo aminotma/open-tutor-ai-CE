@@ -364,12 +364,82 @@ async def main():
     await example_typescript_usage()
     await example_advanced_filtering()
     await example_utility_functions()
+    await example_summarization_layer()
     await example_error_handling()
     example_configuration()
     
     print("\n" + "=" * 80)
     print("End of Examples")
     print("=" * 80 + "\n")
+
+
+# Example 8: Summarization Layer
+async def example_summarization_layer():
+    """
+    Demonstrate the Summarization Layer functionality
+    """
+    print("=" * 80)
+    print("EXAMPLE 8: Summarization Layer")
+    print("=" * 80)
+    
+    # Example of long content that gets summarized
+    long_content = """
+    The quadratic formula is a fundamental mathematical tool used to solve quadratic equations of the form ax² + bx + c = 0. 
+    It provides the solutions for x as x = (-b ± √(b² - 4ac)) / (2a), where a, b, and c are the coefficients of the equation. 
+    The discriminant (b² - 4ac) determines the nature of the roots: if positive, two distinct real roots; if zero, one repeated real root; if negative, two complex roots. 
+    This formula is derived from completing the square and is essential for understanding polynomial equations in algebra. 
+    Students should memorize this formula and practice applying it to various problems to master quadratic equations effectively.
+    """
+    
+    example_request = {
+        "query": "quadratic formula",
+        "max_results": 5,
+        "pedagogical_level": "intermediate",
+        "learning_objectives": [
+            "understand the quadratic formula",
+            "apply it to solve equations"
+        ]
+    }
+    
+    print("\nRequest with learning objectives:")
+    print(json.dumps(example_request, indent=2))
+    
+    # Simulated response showing summarization
+    example_response = [
+        {
+            "rank": 1,
+            "source": "pedagogical",
+            "source_id": "doc_quadratic_001",
+            "content_preview": "The quadratic formula solves ax² + bx + c = 0 as x = (-b ± √(b² - 4ac)) / (2a).",
+            "full_content": "The quadratic formula solves ax² + bx + c = 0 as x = (-b ± √(b² - 4ac)) / (2a). The discriminant determines root nature.",
+            "metadata": {
+                "type": "document",
+                "created_at": 1713476400,
+                "source_id": "doc_quadratic_001",
+                "title": "Quadratic Equations Guide",
+                "subject_domain": "mathematics",
+                "original_length": 850,
+                "summarized_length": 120
+            },
+            "scores": {
+                "relevance": 0.92,
+                "engagement": 0.75,
+                "recency": 0.85,
+                "user_alignment": 0.95,
+                "composite": 0.87,
+                "normalized": 1.0
+            }
+        }
+    ]
+    
+    print("\nResponse (summarized content):")
+    print(json.dumps(example_response, indent=2))
+    
+    print("\nSummarization Benefits:")
+    print("• Original content: 850 characters")
+    print("• Summarized content: 120 characters")
+    print("• Reduction: ~86% size reduction")
+    print("• Key information preserved: formula, discriminant, applications")
 
 
 if __name__ == "__main__":

@@ -41,6 +41,16 @@ CONTEXT_RETRIEVAL_CONFIG = {
         "summarization_model": "gpt-3.5-turbo"
     },
     
+    # Summarization Layer Configuration
+    "summarization": {
+        "enabled": True,
+        "max_content_length": 1000,
+        "sliding_window_size": 10,
+        "score_threshold": 0.3,
+        "summarize_interactions": True,
+        "extract_key_elements": True
+    },
+    
     # Pedagogical Filtering
     "filtering": {
         "relevance_threshold": 0.3,

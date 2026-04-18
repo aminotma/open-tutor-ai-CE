@@ -100,6 +100,164 @@ class NormalizedContextItem:
 
 
 # ============================================================================
+# SUMMARIZATION LAYER
+# ============================================================================
+
+def summarize_interactions(content: str, max_length: int = 500) -> str:
+    """
+    Summarize long interaction content to reduce context size
+    
+    Uses simple extractive summarization based on key sentences
+    """
+    if not content or len(content) <= max_length:
+        return content
+    
+    sentences = [s.strip() for s in content.split('.') if s.strip()]
+    if len(sentences) <= 3:
+        return content[:max_length] + "..."
+    
+    # Extract first, middle, and last sentences as key points
+    key_sentences = []
+    
+    # First sentence (introduction)
+    if sentences:
+        key_sentences.append(sentences[0])
+    
+    # Middle sentences (main content)
+    middle_idx = len(sentences) // 2
+    if middle_idx != 0 and middle_idx != len(sentences) - 1:
+        key_sentences.append(sentences[middle_idx])
+    
+    # Last sentence (conclusion)
+    if len(sentences) > 1:
+        key_sentences.append(sentences[-1])
+    
+    # Join and truncate if still too long
+    summary = '. '.join(key_sentences)
+    if len(summary) > max_length:
+        summary = summary[:max_length - 3] + "..."
+    
+    return summary
+
+
+def sliding_window_filter(
+    items: List[Dict],
+    window_size: int = 10,
+    score_threshold: float = 0.3
+) -> List[Dict]:
+    """
+    Apply sliding window to keep only the most relevant recent items
+    
+    Keeps top N items by score, preferring more recent ones
+    """
+    if len(items) <= window_size:
+        return items
+    
+    # Sort by composite score (descending) then by recency
+    sorted_items = sorted(
+        items,
+        key=lambda x: (x.get("composite_score", 0), x.get("recency_score", 0)),
+        reverse=True
+    )
+    
+    # Keep only top window_size items above threshold
+    filtered = []
+    for item in sorted_items[:window_size]:
+        if item.get("composite_score", 0) >= score_threshold:
+            filtered.append(item)
+    
+    return filtered
+
+
+def extract_key_elements(content: str, query: str) -> str:
+    """
+    Extract key elements from content based on query relevance
+    
+    Identifies sentences most relevant to the query
+    """
+    if not content or not query:
+        return content
+    
+    sentences = [s.strip() for s in content.split('.') if s.strip()]
+    if not sentences:
+        return content
+    
+    query_terms = set(query.lower().split())
+    
+    # Score each sentence by query term matches
+    scored_sentences = []
+    for sentence in sentences:
+        sentence_lower = sentence.lower()
+        matches = sum(1 for term in query_terms if term in sentence_lower)
+        score = matches / len(query_terms) if query_terms else 0
+        scored_sentences.append((sentence, score))
+    
+    # Keep sentences with score > 0, sorted by score
+    relevant_sentences = [
+        sentence for sentence, score in scored_sentences
+        if score > 0
+    ]
+    
+    if not relevant_sentences:
+        # Fallback: keep first and last sentences
+        relevant_sentences = sentences[:1] + sentences[-1:] if len(sentences) > 1 else sentences
+    
+    # Limit to 3 key sentences max
+    relevant_sentences = relevant_sentences[:3]
+    
+    return '. '.join(relevant_sentences)
+
+
+def apply_summarization_layer(
+    ranked_items: List[Dict],
+    query: str,
+    config: Dict
+) -> List[Dict]:
+    """
+    Apply summarization layer to reduce context size while preserving essential information
+    
+    Techniques:
+    - Summarize long interactions
+    - Apply sliding window filtering
+    - Extract key elements based on query
+    """
+    summarization_config = config.get("summarization", {})
+    max_content_length = summarization_config.get("max_content_length", 1000)
+    window_size = summarization_config.get("sliding_window_size", 10)
+    score_threshold = summarization_config.get("score_threshold", 0.3)
+    
+    summarized_items = []
+    
+    for item in ranked_items:
+        summarized_item = item.copy()
+        content = item.get("content", "")
+        
+        # Apply summarization techniques
+        if len(content) > max_content_length:
+            # Extract key elements first
+            content = extract_key_elements(content, query)
+            
+            # Then summarize if still too long
+            if len(content) > max_content_length:
+                content = summarize_interactions(content, max_content_length)
+        
+        summarized_item["content"] = content
+        summarized_item["original_length"] = len(item.get("content", ""))
+        summarized_item["summarized_length"] = len(content)
+        
+        summarized_items.append(summarized_item)
+    
+    # Apply sliding window to final results
+    final_items = sliding_window_filter(
+        summarized_items,
+        window_size=window_size,
+        score_threshold=score_threshold
+    )
+    
+    return final_items
+
+
+# ============================================================================
 # STEP 1: RETRIEVE FROM MULTIPLE SOURCES
 # ============================================================================
 
@@ -797,8 +955,16 @@ async def retrieve_context(
             max_results=request.max_results
         )
         
+        # STEP 6: Apply summarization layer
+        summarization_config = {
+            "max_content_length": 1000,
+            "sliding_window_size": request.max_results,
+            "score_threshold": 0.3
+        }
+        summarized = apply_summarization_layer(ranked, request.query, {"summarization": summarization_config})
+        
         # Format output
-        result = format_ranked_output(ranked)
+        result = format_ranked_output(summarized)
         
         return result
         
