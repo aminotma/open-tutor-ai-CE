@@ -1,9 +1,15 @@
 import { TUTOR_API_BASE_URL } from '$lib/constants';
+import type { MemoryType, MemoryResponse } from '$lib/types/memory';
 
-export const getMemories = async (token: string) => {
+export const getMemories = async (token: string, memoryType?: MemoryType) => {
 	let error = null;
 
-	const res = await fetch(`${TUTOR_API_BASE_URL}/memories/`, {
+	let url = `${TUTOR_API_BASE_URL}/memories/`;
+	if (memoryType) {
+		url += `?memory_type=${encodeURIComponent(memoryType)}`;
+	}
+
+	const res = await fetch(url, {
 		method: 'GET',
 		headers: {
 			Accept: 'application/json',
@@ -25,11 +31,22 @@ export const getMemories = async (token: string) => {
 		throw error;
 	}
 
-	return res;
+	return res as MemoryResponse[];
 };
 
-export const addNewMemory = async (token: string, content: string) => {
+export const addNewMemory = async (
+	token: string,
+	content: string,
+	memoryType: MemoryType = 'semantic',
+	memory_metadata?: Record<string, unknown>
+) => {
 	let error = null;
+
+	const body = {
+		content,
+		memory_type: memoryType,
+		memory_metadata,
+	};
 
 	const res = await fetch(`${TUTOR_API_BASE_URL}/memories/add`, {
 		method: 'POST',
@@ -38,9 +55,7 @@ export const addNewMemory = async (token: string, content: string) => {
 			'Content-Type': 'application/json',
 			authorization: `Bearer ${token}`
 		},
-		body: JSON.stringify({
-			content: content
-		})
+		body: JSON.stringify(body)
 	})
 		.then(async (res) => {
 			if (!res.ok) throw await res.json();
@@ -56,11 +71,23 @@ export const addNewMemory = async (token: string, content: string) => {
 		throw error;
 	}
 
-	return res;
+	return res as MemoryResponse;
 };
 
-export const updateMemoryById = async (token: string, id: string, content: string) => {
+export const updateMemoryById = async (
+	token: string,
+	id: string,
+	content: string,
+	memoryType?: MemoryType,
+	memory_metadata?: Record<string, unknown>
+) => {
 	let error = null;
+
+	const body = {
+		content,
+		memory_type: memoryType,
+		memory_metadata,
+	};
 
 	const res = await fetch(`${TUTOR_API_BASE_URL}/memories/${id}/update`, {
 		method: 'POST',
@@ -69,9 +96,7 @@ export const updateMemoryById = async (token: string, id: string, content: strin
 			'Content-Type': 'application/json',
 			authorization: `Bearer ${token}`
 		},
-		body: JSON.stringify({
-			content: content
-		})
+		body: JSON.stringify(body)
 	})
 		.then(async (res) => {
 			if (!res.ok) throw await res.json();
@@ -87,11 +112,20 @@ export const updateMemoryById = async (token: string, id: string, content: strin
 		throw error;
 	}
 
-	return res;
+	return res as MemoryResponse;
 };
 
-export const queryMemory = async (token: string, content: string) => {
+export const queryMemory = async (
+	token: string,
+	query: string,
+	memoryType?: MemoryType
+) => {
 	let error = null;
+
+	const body = {
+		query,
+		memory_type: memoryType,
+	};
 
 	const res = await fetch(`${TUTOR_API_BASE_URL}/memories/query`, {
 		method: 'POST',
@@ -100,9 +134,7 @@ export const queryMemory = async (token: string, content: string) => {
 			'Content-Type': 'application/json',
 			authorization: `Bearer ${token}`
 		},
-		body: JSON.stringify({
-			content: content
-		})
+		body: JSON.stringify(body)
 	})
 		.then(async (res) => {
 			if (!res.ok) throw await res.json();
@@ -118,7 +150,7 @@ export const queryMemory = async (token: string, content: string) => {
 		throw error;
 	}
 
-	return res;
+	return res as MemoryResponse[];
 };
 
 export const deleteMemoryById = async (token: string, id: string) => {

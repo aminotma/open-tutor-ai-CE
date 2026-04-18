@@ -8,6 +8,7 @@
 	import Modal from '$lib/components/common/Modal.svelte';
 	import AddMemoryModal from './AddMemoryModal.svelte';
 	import { deleteMemoriesByUserId, deleteMemoryById, getMemories } from '$lib/apis/memories';
+	import type { MemoryType } from '$lib/types/memory';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import { error } from '@sveltejs/kit';
 	import EditMemoryModal from './EditMemoryModal.svelte';
@@ -20,17 +21,23 @@
 
 	let memories = [];
 	let loading = true;
+	let selectedTypeFilter: MemoryType | 'all' = 'all';
+	const memoryTypes: Array<MemoryType | 'all'> = ['all', 'episodic', 'semantic', 'procedural', 'behavioral'];
 
 	let showAddMemoryModal = false;
 	let showEditMemoryModal = false;
 
 	let selectedMemory = null;
 
-	$: if (show && memories.length === 0 && loading) {
-		(async () => {
-			memories = await getMemories(localStorage.token);
-			loading = false;
-		})();
+	const loadMemories = async () => {
+		loading = true;
+		const typeParam = selectedTypeFilter === 'all' ? undefined : selectedTypeFilter;
+		memories = await getMemories(localStorage.token, typeParam);
+		loading = false;
+	};
+
+	$: if (show && loading) {
+		loadMemories();
 	}
 </script>
 
@@ -58,6 +65,21 @@
 		</div>
 
 		<div class="flex flex-col w-full px-5 pb-5 dark:text-gray-200">
+			<div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
+				<div class="text-sm text-gray-500 dark:text-gray-400">
+					{$i18n.t('Filter by memory type')}
+				</div>
+				<select
+					bind:value={selectedTypeFilter}
+					on:change={loadMemories}
+					class="rounded-3xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
+				>
+					{#each memoryTypes as memoryType}
+						<option value={memoryType}>{memoryType === 'all' ? $i18n.t('All') : memoryType}</option>
+					{/each}
+				</select>
+			</div>
+
 			<div
 				class=" flex flex-col w-full sm:flex-row sm:justify-center sm:space-x-6 h-[28rem] max-h-screen outline outline-1 rounded-xl outline-gray-100 dark:outline-gray-800 mb-4 mt-1"
 			>
@@ -70,8 +92,9 @@
 								>
 									<tr>
 										<th scope="col" class="px-3 py-2"> {$i18n.t('Name')} </th>
-										<th scope="col" class="px-3 py-2 hidden md:flex">
-											{$i18n.t('Last Modified')}
+										<th scope="col" class="px-3 py-2 hidden md:flex">										{$i18n.t('Type')}
+									</th>
+									<th scope="col" class="px-3 py-2 hidden md:flex">											{$i18n.t('Last Modified')}
 										</th>
 										<th scope="col" class="px-3 py-2 text-right" />
 									</tr>
@@ -84,7 +107,12 @@
 													{memory.content}
 												</div>
 											</td>
-											<td class=" px-3 py-1 hidden md:flex h-[2.5rem]">
+											<td class="px-3 py-1 hidden md:flex">
+									<div class="my-auto uppercase tracking-wider text-xs text-gray-500 dark:text-gray-400">
+										{memory.memory_type}
+									</div>
+								</td>
+								<td class=" px-3 py-1 hidden md:flex h-[2.5rem]">
 												<div class="my-auto whitespace-nowrap">
 													{dayjs(memory.updated_at * 1000).format('LLL')}
 												</div>

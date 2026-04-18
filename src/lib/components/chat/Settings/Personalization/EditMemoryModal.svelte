@@ -1,33 +1,32 @@
-<script>
+<script lang="ts">
 	import { createEventDispatcher, getContext } from 'svelte';
 	import { toast } from 'svelte-sonner';
 
 	import { updateMemoryById } from '$lib/apis/memories';
+	import type { MemoryType, MemoryResponse } from '$lib/types/memory';
 
 	import Modal from '$lib/components/common/Modal.svelte';
 
 	const dispatch = createEventDispatcher();
 
 	export let show;
-	export let memory = {};
+	export let memory: MemoryResponse = {} as MemoryResponse;
 
 	const i18n = getContext('i18n');
 
 	let loading = false;
 	let content = '';
-
-	$: if (show) {
-		setContent();
-	}
+	let memoryType: MemoryType = 'semantic';
 
 	const setContent = () => {
 		content = memory.content;
+		memoryType = memory.memory_type ?? 'semantic';
 	};
 
 	const submitHandler = async () => {
 		loading = true;
 
-		const res = await updateMemoryById(localStorage.token, memory.id, content).catch((error) => {
+		const res = await updateMemoryById(localStorage.token, memory.id, content, memoryType).catch((error) => {
 			toast.error(`${error}`);
 
 			return null;
@@ -77,7 +76,20 @@
 						submitHandler();
 					}}
 				>
-					<div class="">
+<div class="space-y-3">
+							<div class="flex flex-col gap-2 text-sm text-gray-700 dark:text-gray-200">
+								<label for="memory-type" class="font-medium">{$i18n.t('Memory type')}</label>
+								<select
+									id="memory-type"
+									bind:value={memoryType}
+									class="rounded-3xl border border-gray-200 bg-white px-3 py-2 outline-none dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
+								>
+									<option value="episodic">{$i18n.t('Episodic')}</option>
+									<option value="semantic">{$i18n.t('Semantic')}</option>
+									<option value="procedural">{$i18n.t('Procedural')}</option>
+									<option value="behavioral">{$i18n.t('Behavioral')}</option>
+								</select>
+							</div>
 						<textarea
 							bind:value={content}
 							class=" bg-transparent w-full text-sm resize-none rounded-xl p-3 outline outline-1 outline-gray-100 dark:outline-gray-800"
