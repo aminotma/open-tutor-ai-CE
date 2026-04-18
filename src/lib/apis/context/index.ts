@@ -43,6 +43,7 @@ export interface ContextRetrievalRequest {
 	include_source_types?: ('pedagogical' | 'memory' | 'summary')[];
 	memory_types?: ('episodic' | 'semantic' | 'procedural' | 'behavioral')[];
 	pedagogical_level?: 'beginner' | 'intermediate' | 'advanced';
+	learning_objectives?: string[];
 }
 
 export interface ContextStatsResponse {
@@ -104,6 +105,10 @@ export const retrieveContext = async (
 
 	if (request.pedagogical_level) {
 		body.pedagogical_level = request.pedagogical_level;
+	}
+
+	if (request.learning_objectives) {
+		body.learning_objectives = request.learning_objectives;
 	}
 
 	const res = await fetch(url, {

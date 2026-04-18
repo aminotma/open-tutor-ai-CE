@@ -80,6 +80,8 @@ export interface ContextRetrievalOptions {
 	memory_types?: MemoryTypeForContext[];
 	/** User's pedagogical level for filtering */
 	pedagogical_level?: PedagogicalLevel;
+	/** User learning objectives to align retrieved context */
+	learning_objectives?: string[];
 }
 
 /**

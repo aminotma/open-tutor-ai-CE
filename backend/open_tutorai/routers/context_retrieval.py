@@ -37,7 +37,7 @@ class ContextRetrievalRequest(BaseModel):
     query: str = Field(..., min_length=1, description="Search query")
     max_results: int = Field(20, ge=1, le=50, description="Maximum results to return")
     include_source_types: Optional[List[str]] = Field(
-        None, 
+        None,
         description="Filter by source types: 'pedagogical', 'memory', 'summary'"
     )
     memory_types: Optional[List[str]] = Field(
@@ -47,6 +47,10 @@ class ContextRetrievalRequest(BaseModel):
     pedagogical_level: Optional[str] = Field(
         "intermediate",
         description="User pedagogical level: 'beginner', 'intermediate', 'advanced'"
+    )
+    learning_objectives: Optional[List[str]] = Field(
+        None,
+        description="Learning objectives to align retrieved context with user goals"
     )
 
 
@@ -395,6 +399,31 @@ def calculate_engagement_score(item_type: str, metadata: Dict) -> float:
     return min(score, 1.0)
 
 
+def calculate_user_alignment(
+    subject_domain: str,
+    user_profile: Dict,
+    content: str
+) -> float:
+    """
+    Calculate alignment score with user interests and learning objectives.
+    """
+    user_interests = [str(item).lower() for item in user_profile.get("interests", []) if item]
+    learning_objectives = [str(item).lower() for item in user_profile.get("learning_objectives", []) if item]
+    subject = str(subject_domain or "").lower()
+    text = content.lower()
+
+    if subject and subject in user_interests:
+        return 1.0
+
+    if any(obj in subject for obj in learning_objectives):
+        return 0.9
+
+    if any(obj in text for obj in learning_objectives):
+        return 0.8
+
+    return 0.5
+
+
 async def enrich_context(
     context_items: List[NormalizedContextItem],
     user_id: str,
@@ -419,9 +448,12 @@ async def enrich_context(
         engagement_score = calculate_engagement_score(item.source_type, item.metadata)
         
         # Calculate user alignment score
-        user_interests = user_profile.get("interests", [])
         subject_domain = item.metadata.get("subject_domain", "general")
-        user_alignment = 1.0 if subject_domain in user_interests else 0.5
+        user_alignment = calculate_user_alignment(
+            subject_domain,
+            user_profile,
+            item.content
+        )
         
         enriched.append({
             **item.__dict__,
@@ -700,7 +732,8 @@ async def retrieve_context(
         # Build user profile
         user_profile = {
             "pedagogical_level": request.pedagogical_level or "intermediate",
-            "interests": []
+            "interests": [],
+            "learning_objectives": request.learning_objectives or []
         }
         
         # STEP 1: Retrieve from multiple sources
