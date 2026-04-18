@@ -22,7 +22,11 @@ CONTEXT_RETRIEVAL_CONFIG = {
     "rag": {
         "enabled": True,
         "top_k_documents": 5,
-        "min_vector_similarity": 0.3
+        "min_vector_similarity": 0.3,
+        "verification_enabled": True,
+        "verification_threshold": 0.65,
+        "verification_min_support": 0.5,
+        "local_document_paths": ["docs", "backend"]
     },
     
     # Memory Configuration

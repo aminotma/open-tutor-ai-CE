@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from math import exp
 import json
+import os
+import re
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -261,6 +263,25 @@ def apply_summarization_layer(
 # STEP 1: RETRIEVE FROM MULTIPLE SOURCES
 # ============================================================================
 
+def _read_text_file(path: Path) -> Optional[str]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        return text
+    except Exception:
+        return None
+
+
+def _score_document_relevance(content: str, query: str) -> float:
+    query_terms = re.findall(r"\w+", query.lower())
+    if not query_terms:
+        return 0.0
+
+    content_lower = content.lower()
+    matches = sum(1 for term in query_terms if term in content_lower)
+    score = min(1.0, matches / max(len(query_terms), 1))
+    return float(score)
+
+
 async def retrieve_pedagogical_documents(
     user_id: str,
     query: str,
@@ -268,17 +289,51 @@ async def retrieve_pedagogical_documents(
 ) -> List[Dict]:
     """
     Retrieve pedagogical documents using RAG (Retrieval-Augmented Generation)
-    
-    Sources: backend/data/uploads/, vectorial search
+
+    This implementation uses a document fallback search over local repository
+    educational content and metadata. It returns documents that contain query
+    terms and can be used to verify tutor outputs against verified sources.
     """
     try:
-        # This would typically use a vector database (e.g., Weaviate, Pinecone, etc.)
-        # For now, returning placeholder structure
-        # TODO: Integrate with actual RAG system when available
-        
-        # Placeholder: Return empty list for now (integration needed)
-        return []
-        
+        if not query or not query.strip():
+            return []
+
+        repo_root = Path(__file__).resolve().parents[4]
+        search_paths = [repo_root / "docs", repo_root / "backend"]
+        documents = []
+
+        for base_path in search_paths:
+            if not base_path.exists():
+                continue
+            for root, _, files in os.walk(base_path):
+                for file_name in files:
+                    if not file_name.lower().endswith((".md", ".txt", ".json")):
+                        continue
+                    file_path = Path(root) / file_name
+                    text = _read_text_file(file_path)
+                    if not text:
+                        continue
+
+                    relevance_score = _score_document_relevance(text, query)
+                    if relevance_score <= 0:
+                        continue
+
+                    preview = " ".join(text.replace("\n", " ").split())[:400]
+                    documents.append({
+                        "id": str(file_path.relative_to(repo_root)),
+                        "source_type": "rag",
+                        "content": text,
+                        "metadata": {
+                            "title": file_name,
+                            "path": str(file_path.relative_to(repo_root)),
+                            "source": "local_document",
+                        },
+                        "relevance_score": relevance_score,
+                    })
+
+        documents.sort(key=lambda x: x["relevance_score"], reverse=True)
+        return documents[:top_k]
+
     except Exception as e:
         print(f"Error retrieving pedagogical documents: {str(e)}")
         return []

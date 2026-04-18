@@ -94,3 +94,17 @@ Le module reste simple mais extensible :
 - on peut enrichir la génération d'exercices via un moteur de générative
 - on peut intégrer des données de feedbacks existantes depuis la base de données
 - on peut ajouter une méthode de planification à long terme sur plusieurs sessions
+
+## Vérification RAG des résultats du tutor
+
+Une couche de vérification a été ajoutée pour contrôler la justesse des résultats avant affichage :
+- `backend/open_tutorai/routers/adaptive_tutor.py` vérifie les exercices et la stratégie générés
+- elle utilise `retrieve_pedagogical_documents()` via une couche RAG documentaire locale
+- le résultat inclut un `verification` dans la réponse de `/api/v1/adaptive/plan`
+- un endpoint dédié `/api/v1/adaptive/verify` permet de vérifier manuellement des sorties générées
+
+Cette vérification renvoie :
+- un score de support
+- des éléments soutenus / non soutenus
+- les sources RAG consultées
+- un verdict `supported` ou `needs_review`

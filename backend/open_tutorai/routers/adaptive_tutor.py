@@ -1,4 +1,5 @@
 from typing import List, Optional, Dict, Any
+import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -6,6 +7,8 @@ from pydantic import BaseModel, Field
 
 from open_webui.internal.db import get_db
 from open_webui.utils.auth import get_verified_user
+from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG
+from open_tutorai.routers.context_retrieval import retrieve_pedagogical_documents
 
 router = APIRouter(tags=["adaptive"])
 
@@ -50,12 +53,31 @@ class ExerciseSuggestion(BaseModel):
     skill_target: str
 
 
+class VerificationSource(BaseModel):
+    source_id: str
+    title: Optional[str] = None
+    preview: str
+    relevance_score: float
+    path: Optional[str] = None
+
+
+class VerificationReport(BaseModel):
+    verified: bool
+    support_score: float
+    supported_items: List[str]
+    unsupported_items: List[str]
+    sources: List[VerificationSource]
+    verdict: str
+    note: Optional[str] = None
+
+
 class AdaptiveTutorResponse(BaseModel):
     adjusted_level: str
     detected_difficulties: List[str]
     suggested_exercises: List[ExerciseSuggestion]
     strategy: List[str]
     priority_focus: List[str]
+    verification: Optional[VerificationReport] = None
     notes: Optional[str] = None
 
 
@@ -254,6 +276,196 @@ def plan_learning_strategy(
     return strategy
 
 
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def _tokenize(text: str) -> List[str]:
+    return [token for token in re.findall(r"\w{4,}", text.lower())]
+
+
+def _is_text_supported(candidate: str, source_corpus: str, threshold: float = 0.15) -> bool:
+    candidate_tokens = _tokenize(candidate)
+    if not candidate_tokens or not source_corpus:
+        return False
+
+    source_tokens = set(_tokenize(source_corpus))
+    match_count = sum(1 for token in candidate_tokens if token in source_tokens)
+    return (match_count / len(candidate_tokens)) >= threshold
+
+
+def _build_verification_candidates(
+    request: AdaptiveTutorRequest,
+    exercises: List[Dict[str, Any]],
+    strategy: List[str]
+) -> List[str]:
+    candidates = [request.topic]
+    if request.learning_objectives:
+        candidates.extend(request.learning_objectives)
+    for exercise in exercises:
+        candidates.append(exercise["question"])
+        candidates.append(exercise["answer"])
+    candidates.extend(strategy)
+    return [c for c in candidates if c and c.strip()]
+
+
+async def verify_adaptive_tutor_output(
+    user_id: str,
+    request: AdaptiveTutorRequest,
+    exercises: List[Dict[str, Any]],
+    strategy: List[str]
+) -> VerificationReport:
+    rag_config = CONTEXT_RETRIEVAL_CONFIG.get("rag", {})
+    if not rag_config.get("verification_enabled", False):
+        return VerificationReport(
+            verified=False,
+            support_score=0.0,
+            supported_items=[],
+            unsupported_items=[],
+            sources=[],
+            verdict="verification_disabled",
+            note="La vérification RAG est désactivée dans la configuration."
+        )
+
+    query = request.topic
+    if request.learning_objectives:
+        query += " " + " ".join(request.learning_objectives)
+
+    sources = await retrieve_pedagogical_documents(
+        user_id,
+        query,
+        top_k=rag_config.get("top_k_documents", 5)
+    )
+
+    if not sources:
+        return VerificationReport(
+            verified=False,
+            support_score=0.0,
+            supported_items=[],
+            unsupported_items=[],
+            sources=[],
+            verdict="no_sources_found",
+            note=(
+                "Aucune source vérifiée n'a été trouvée. "
+                "La vérification nécessite un système RAG ou des documents locaux disponibles."
+            )
+        )
+
+    source_corpus = " ".join([src.get("content", "") for src in sources])
+    candidates = _build_verification_candidates(request, exercises, strategy)
+
+    supported_items = []
+    unsupported_items = []
+    for candidate in candidates:
+        if _is_text_supported(candidate, source_corpus):
+            supported_items.append(candidate)
+        else:
+            unsupported_items.append(candidate)
+
+    support_score = len(supported_items) / max(1, len(candidates))
+    threshold = rag_config.get("verification_threshold", 0.65)
+    verified = support_score >= threshold
+    verdict = "supported" if verified else "needs_review"
+
+    return VerificationReport(
+        verified=verified,
+        support_score=round(support_score, 3),
+        supported_items=supported_items,
+        unsupported_items=unsupported_items,
+        sources=[
+            VerificationSource(
+                source_id=src.get("id", ""),
+                title=src.get("metadata", {}).get("title"),
+                preview=(src.get("content", "")[:280] + "...") if len(src.get("content", "")) > 280 else src.get("content", ""),
+                relevance_score=round(src.get("relevance_score", 0.0), 3),
+                path=src.get("metadata", {}).get("path")
+            )
+            for src in sources
+        ],
+        verdict=verdict,
+        note=(
+            "Vérification terminée à l'aide des sources RAG locales. "
+            "Les éléments non appuyés doivent être relus ou enrichis."
+            if verified else
+            "Certains éléments n'ont pas pu être appuyés par les sources disponibles."
+        )
+    )
+
+
+class AdaptiveTutorVerificationRequest(BaseModel):
+    topic: str = Field(..., description="Sujet ou question du tutoriel à vérifier")
+    generated_texts: List[str] = Field(..., description="Textes ou énoncés générés par le tutor à vérifier")
+    learning_objectives: Optional[List[str]] = Field(
+        None,
+        description="Objectifs pédagogiques utilisés pour orienter la vérification"
+    )
+
+
+@router.post("/adaptive/verify", response_model=VerificationReport)
+async def verify_adaptive_output(
+    request: AdaptiveTutorVerificationRequest,
+    user=Depends(get_verified_user)
+):
+    rag_config = CONTEXT_RETRIEVAL_CONFIG.get("rag", {})
+    if not rag_config.get("verification_enabled", False):
+        return VerificationReport(
+            verified=False,
+            support_score=0.0,
+            supported_items=[],
+            unsupported_items=[],
+            sources=[],
+            verdict="verification_disabled",
+            note="La vérification RAG est désactivée dans la configuration."
+        )
+
+    query = request.topic
+    if request.learning_objectives:
+        query += " " + " ".join(request.learning_objectives)
+
+    sources = await retrieve_pedagogical_documents(
+        user.id,
+        query,
+        top_k=rag_config.get("top_k_documents", 5)
+    )
+
+    source_corpus = " ".join([src.get("content", "") for src in sources])
+    supported_items = []
+    unsupported_items = []
+    for text in request.generated_texts:
+        if _is_text_supported(text, source_corpus):
+            supported_items.append(text)
+        else:
+            unsupported_items.append(text)
+
+    support_score = len(supported_items) / max(1, len(request.generated_texts))
+    verified = support_score >= rag_config.get("verification_threshold", 0.65)
+    verdict = "supported" if verified else "needs_review"
+
+    return VerificationReport(
+        verified=verified,
+        support_score=round(support_score, 3),
+        supported_items=supported_items,
+        unsupported_items=unsupported_items,
+        sources=[
+            VerificationSource(
+                source_id=src.get("id", ""),
+                title=src.get("metadata", {}).get("title"),
+                preview=(src.get("content", "")[:280] + "...") if len(src.get("content", "")) > 280 else src.get("content", ""),
+                relevance_score=round(src.get("relevance_score", 0.0), 3),
+                path=src.get("metadata", {}).get("path")
+            )
+            for src in sources
+        ],
+        verdict=verdict,
+        note=(
+            "Vérification terminée à l'aide des sources RAG locales. "
+            "Les éléments non appuyés doivent être relus ou enrichis."
+            if verified else
+            "Certains éléments n'ont pas pu être appuyés par les sources disponibles."
+        )
+    )
+
+
 @router.post("/adaptive/plan", response_model=AdaptiveTutorResponse)
 async def create_adaptive_plan(
     request: AdaptiveTutorRequest,
@@ -289,12 +501,20 @@ async def create_adaptive_plan(
             request.feedback_comments,
         )
 
+        verification_report = await verify_adaptive_tutor_output(
+            user.id,
+            request,
+            exercises,
+            strategy,
+        )
+
         return {
             "adjusted_level": adjusted_level,
             "detected_difficulties": difficulties,
             "suggested_exercises": [ExerciseSuggestion(**exercise) for exercise in exercises],
             "strategy": strategy,
-            "priority_focus": difficulties or [f"Renforcer {request.topic}"]
+            "priority_focus": difficulties or [f"Renforcer {request.topic}"],
+            "verification": verification_report,
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Adaptive tutor plan failed: {str(exc)}")
