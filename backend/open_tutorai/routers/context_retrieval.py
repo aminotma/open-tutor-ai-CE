@@ -15,9 +15,11 @@ from uuid import uuid4
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from math import exp
+import difflib
 import json
 import os
 import re
+import tiktoken
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -105,41 +107,51 @@ class NormalizedContextItem:
 # SUMMARIZATION LAYER
 # ============================================================================
 
-def summarize_interactions(content: str, max_length: int = 500) -> str:
+def summarize_interactions(content: str, max_tokens: int = 500) -> str:
     """
     Summarize long interaction content to reduce context size
     
-    Uses simple extractive summarization based on key sentences
+    Uses token-aware truncation to stay within limits
     """
-    if not content or len(content) <= max_length:
-        return content
+    if not content:
+        return ""
     
+    # Use tiktoken to count tokens (approximating GPT models)
+    try:
+        enc = tiktoken.get_encoding("cl100k_base")  # GPT-3.5/4 encoding
+        tokens = enc.encode(content)
+        if len(tokens) <= max_tokens:
+            return content
+    except Exception:
+        # Fallback to character count if tiktoken fails
+        if len(content) <= max_tokens * 4:  # Rough estimate: 4 chars per token
+            return content
+        return content[:max_tokens * 4] + "..."
+    
+    # Extract key sentences and truncate to fit token limit
     sentences = [s.strip() for s in content.split('.') if s.strip()]
     if len(sentences) <= 3:
-        return content[:max_length] + "..."
+        truncated_tokens = tokens[:max_tokens]
+        return enc.decode(truncated_tokens) + "..."
     
-    # Extract first, middle, and last sentences as key points
+    # Extract first, middle, and last sentences
     key_sentences = []
-    
-    # First sentence (introduction)
     if sentences:
         key_sentences.append(sentences[0])
-    
-    # Middle sentences (main content)
     middle_idx = len(sentences) // 2
     if middle_idx != 0 and middle_idx != len(sentences) - 1:
         key_sentences.append(sentences[middle_idx])
-    
-    # Last sentence (conclusion)
     if len(sentences) > 1:
         key_sentences.append(sentences[-1])
     
-    # Join and truncate if still too long
     summary = '. '.join(key_sentences)
-    if len(summary) > max_length:
-        summary = summary[:max_length - 3] + "..."
+    summary_tokens = enc.encode(summary)
+    if len(summary_tokens) <= max_tokens:
+        return summary
     
-    return summary
+    # Truncate summary to fit
+    truncated_tokens = summary_tokens[:max_tokens - 10]  # Leave room for "..."
+    return enc.decode(truncated_tokens) + "..."
 
 
 def sliding_window_filter(
@@ -241,7 +253,7 @@ def apply_summarization_layer(
             
             # Then summarize if still too long
             if len(content) > max_content_length:
-                content = summarize_interactions(content, max_content_length)
+                content = summarize_interactions(content, max_tokens=max_content_length // 4)
         
         summarized_item["content"] = content
         summarized_item["original_length"] = len(item.get("content", ""))
@@ -271,6 +283,21 @@ def _read_text_file(path: Path) -> Optional[str]:
         return None
 
 
+def _tokenize_text(text: str) -> List[str]:
+    return [token for token in re.findall(r"\w{3,}", text.lower())]
+
+
+def _calculate_text_similarity(query: str, content: str) -> float:
+    query_tokens = set(_tokenize_text(query))
+    content_tokens = set(_tokenize_text(content))
+    if not query_tokens or not content_tokens:
+        return 0.0
+
+    overlap = len(query_tokens & content_tokens) / max(1, len(query_tokens | content_tokens))
+    sequence_ratio = difflib.SequenceMatcher(None, query.lower(), content.lower()).ratio()
+    return min(1.0, 0.6 * overlap + 0.4 * sequence_ratio)
+
+
 def _score_document_relevance(content: str, query: str) -> float:
     query_terms = re.findall(r"\w+", query.lower())
     if not query_terms:
@@ -278,8 +305,9 @@ def _score_document_relevance(content: str, query: str) -> float:
 
     content_lower = content.lower()
     matches = sum(1 for term in query_terms if term in content_lower)
-    score = min(1.0, matches / max(len(query_terms), 1))
-    return float(score)
+    exact_score = min(1.0, matches / max(len(query_terms), 1))
+    similarity_score = _calculate_text_similarity(query, content)
+    return float(max(exact_score, similarity_score))
 
 
 async def retrieve_pedagogical_documents(
@@ -350,35 +378,41 @@ async def retrieve_internal_memory(
     Retrieve internal memories matching the query
     
     Source: opentutorai_memory table
-    Uses: ILIKE for text search
+    Uses: a stronger relevance scoring model than simple text matching.
     """
     if db is None:
         return []
     
     try:
-        # Build the base query
         db_query = db.query(Memory).filter(Memory.user_id == user_id)
-        
-        # Filter by memory types if provided
         if memory_types and len(memory_types) > 0:
             db_query = db_query.filter(Memory.memory_type.in_(memory_types))
-        
-        # Search in content using ILIKE
-        search_pattern = f"%{query}%"
-        db_query = db_query.filter(Memory.content.ilike(search_pattern))
-        
-        # Order by recency
-        memories = db_query.order_by(
-            Memory.updated_at.desc().nullslast(),
-            Memory.created_at.desc()
-        ).limit(limit).all()
-        
-        # Convert to dict format
+
+        # Use ILIKE as a fast filter for candidate memories, but keep a broader fallback.
+        memories = []
+        if query and query.strip():
+            search_pattern = f"%{query}%"
+            candidate_query = db_query.filter(Memory.content.ilike(search_pattern))
+            memories = candidate_query.order_by(
+                Memory.updated_at.desc().nullslast(),
+                Memory.created_at.desc()
+            ).limit(limit * 3).all()
+
+        if not memories:
+            memories = db_query.order_by(
+                Memory.updated_at.desc().nullslast(),
+                Memory.created_at.desc()
+            ).limit(limit * 10).all()
+
         results = []
         for memory in memories:
-            # Calculate textual relevance score
-            textual_score = calculate_relevance(memory.content, query)
-            
+            semantic_score = (
+                calculate_relevance(memory.content, query)
+                if query and query.strip()
+                else 0.5
+            )
+            if query and query.strip() and semantic_score <= 0.05:
+                continue
             results.append({
                 "id": memory.id,
                 "type": memory.memory_type,
@@ -386,11 +420,13 @@ async def retrieve_internal_memory(
                 "metadata": memory.memory_metadata or {},
                 "created_at": memory.created_at.timestamp() if memory.created_at else None,
                 "updated_at": memory.updated_at.timestamp() if memory.updated_at else None,
-                "textual_score": textual_score
+                "textual_score": semantic_score
             })
-        
-        return results
-        
+
+        # Sort by semantic relevance and recency
+        results.sort(key=lambda item: (item["textual_score"], item.get("updated_at", 0)), reverse=True)
+        return results[:limit]
+
     except Exception as e:
         print(f"Error retrieving internal memory: {str(e)}")
         return []
@@ -546,9 +582,9 @@ def calculate_relevance(content: str, query: str) -> float:
         return 0.0
     
     matches = sum(1 for term in terms if term in content_lower)
-    score = min(matches / len(terms), 1.0)
-    
-    return score
+    exact_score = min(matches / len(terms), 1.0)
+    similarity_score = _calculate_text_similarity(query, content)
+    return max(exact_score, similarity_score)
 
 
 def deduce_pedagogical_level(content: str) -> str:
@@ -966,7 +1002,19 @@ async def retrieve_context(
             user.id, request.query, limit=5
         )
         
-        # Filter by source types if specified
+        # Generate lightweight summaries when cache is empty
+        if not summaries:
+            summaries = []
+            for item in (documents[:2] + memories[:2]):
+                content = item.get("content", "")
+                if content:
+                    summaries.append({
+                        "id": f"generated-{item.get('id', 'unknown')}",
+                        "text": summarize_interactions(content, max_tokens=300),
+                        "source_conversation": item.get("id", ""),
+                        "created_at": datetime.now(timezone.utc).timestamp(),
+                        "summary_score": calculate_relevance(content, request.query)
+                    })
         if request.include_source_types:
             source_types = request.include_source_types
             if "pedagogical" not in source_types:

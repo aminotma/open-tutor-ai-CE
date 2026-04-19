@@ -110,7 +110,9 @@
 			email,
 			password,
 			generateInitialsImage(name),
-			role
+			role,
+			firstName,
+			lastName
 		).catch((error) => {
 			toast.error(`${error}`);
 			return null;

@@ -11,6 +11,9 @@ logger = logging.getLogger("avatar_backend")
 # API Keys
 GEMINI_API_KEY = "AIzaSyAsTdSsCLN15SswJuzrlJWUHSnd10zw0fU"
 
+# Import for database access
+from open_webui.models.users import Users
+
 # Avatar personalities
 AVATAR_PERSONALITIES = {
     "scholar": """You are The Scholar: analytical, detail-oriented, methodical, and patient. You emphasize deep understanding of fundamental concepts and provide comprehensive explanations with historical context and precise terminology. Your communication style is clear, formal, and structured with thoughtful pauses. You use academic language and reference research when appropriate. 
@@ -119,6 +122,45 @@ class Pipeline:
             avatar_type = "default"
 
         return avatar_type
+
+    def _extract_user_name(self, messages, body=None, user_id=None):
+        """Extract user name from messages, body, or database"""
+        user_name = None
+
+        # Try to extract from body first if provided
+        if body and isinstance(body, dict):
+            user_name = body.get("user_name") or body.get("name")
+
+        # If not found in body, try to extract from messages
+        if not user_name and isinstance(messages, dict):
+            user_name = messages.get("user_name") or messages.get("name")
+            
+            # Check metadata in messages
+            if not user_name and "messages" in messages and messages["messages"]:
+                for msg in messages["messages"]:
+                    if isinstance(msg, dict) and "metadata" in msg:
+                        user_name = (
+                            msg.get("metadata", {})
+                            .get("user_name") or 
+                            msg.get("metadata", {}).get("name")
+                        )
+                        if user_name:
+                            break
+
+        # If still not found, try to get from database using user_id
+        if not user_name and user_id:
+            try:
+                user = Users.get_user_by_id(user_id)
+                if user and user.meta_data:
+                    meta_data = user.meta_data if isinstance(user.meta_data, dict) else {}
+                    first_name = meta_data.get('first_name')
+                    last_name = meta_data.get('last_name')
+                    if first_name or last_name:
+                        user_name = f"{first_name or ''} {last_name or ''}".strip()
+            except Exception as e:
+                logger.warning(f"Failed to retrieve user name from database: {e}")
+
+        return user_name
 
     def _get_avatar_gender(self, avatar_type):
         """Get the gender for the avatar type"""
@@ -299,7 +341,7 @@ For a demonstration with locomotion:
 
 The user's question is: """
 
-    def _call_gemini_api(self, prompt, avatar_type="default"):
+    def _call_gemini_api(self, prompt, avatar_type="default", user_name=None):
         """Call the Gemini API with the given prompt."""
         try:
             url = (
@@ -322,8 +364,13 @@ The user's question is: """
 
             # Prepend avatar animation instructions to the prompt
             avatar_instructions = personality_instruction + animation_instructions
+            
+            # Add user name context if available
+            user_context = ""
+            if user_name:
+                user_context = f"\n\nYou are speaking with {user_name}. Address them by name in your responses when appropriate to make the conversation more personal and engaging."
 
-            full_prompt = avatar_instructions + prompt
+            full_prompt = avatar_instructions + user_context + prompt
 
             data = {"contents": [{"parts": [{"text": full_prompt}]}]}
 
@@ -379,8 +426,16 @@ The user's question is: """
         avatar_type = self._extract_avatar_type({"messages": messages}, body)
         logger.info(f"Using avatar type: {avatar_type}")
 
+        # Extract user_id from body if available
+        user_id = body.get("user_id") if body else None
+
+        # Extract user name for personalization
+        user_name = self._extract_user_name({"messages": messages}, body, user_id)
+        if user_name:
+            logger.info(f"Using user name: {user_name}")
+
         # Call Gemini API to get text response with the appropriate avatar personality
-        text_response = self._call_gemini_api(user_message, avatar_type)
+        text_response = self._call_gemini_api(user_message, avatar_type, user_name)
 
         # Return just the raw text response
         return text_response

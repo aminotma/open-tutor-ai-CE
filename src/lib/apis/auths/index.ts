@@ -318,7 +318,9 @@ export const userSignUp = async (
 	email: string,
 	password: string,
 	profile_image_url: string,
-	role?: string
+	role?: string,
+	first_name?: string,
+	last_name?: string
 ) => {
 	let error = null;
 
@@ -333,7 +335,9 @@ export const userSignUp = async (
 			email: email,
 			password: password,
 			profile_image_url: profile_image_url,
-			role: role
+			role: role,
+			first_name: first_name,
+			last_name: last_name
 		})
 	})
 		.then(async (res) => {

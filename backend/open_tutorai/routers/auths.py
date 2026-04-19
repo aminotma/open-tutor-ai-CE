@@ -2,14 +2,10 @@ import time
 import datetime
 import logging
 
-from open_webui.models.auths import (
-    AddUserForm,
-    Auths,
-    Token,
-    UserResponse,
-)
+from open_webui.models.auths import Auths, Token, UserResponse
 from open_webui.models.users import Users
 from open_webui.models.models import Models, ModelForm
+from pydantic import BaseModel
 
 from open_webui.constants import ERROR_MESSAGES, WEBHOOK_MESSAGES
 from open_webui.env import (
@@ -42,8 +38,22 @@ class SessionUserResponse(Token, UserResponse):
     permissions: Optional[dict] = None
 
 
+class SignupForm(BaseModel):
+    name: str
+    email: str
+    password: str
+    profile_image_url: Optional[str] = None
+    role: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+
+    model_config = {
+        "extra": "ignore"
+    }
+
+
 @router.post("/signup", response_model=SessionUserResponse)
-async def signup(request: Request, response: Response, form_data: AddUserForm):
+async def signup(request: Request, response: Response, form_data: SignupForm):
 
     if WEBUI_AUTH:
         if (
@@ -97,6 +107,14 @@ async def signup(request: Request, response: Response, form_data: AddUserForm):
         )
 
         if user:
+            # Store first_name and last_name in user meta_data
+            if form_data.first_name or form_data.last_name:
+                meta_data = user.meta_data or {}
+                if form_data.first_name:
+                    meta_data['first_name'] = form_data.first_name
+                if form_data.last_name:
+                    meta_data['last_name'] = form_data.last_name
+                Users.update_user_by_id(user.id, {'meta_data': meta_data})
 
             # If this is not the first user (admin), update admin models to be public
             if user_count > 0:

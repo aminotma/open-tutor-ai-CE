@@ -8,8 +8,8 @@ Implémenter une couche de résumé pour réduire la taille du contexte tout en 
 
 ### 1. Résumé des interactions (`summarize_interactions`)
 - **Objectif** : Réduire les contenus longs tout en gardant les points clés
-- **Méthode** : Extraction des phrases clés (début, milieu, fin)
-- **Limite** : Longueur maximale configurable (défaut : 1000 caractères)
+- **Méthode** : Extraction des phrases clés (début, milieu, fin) avec comptage de tokens via `tiktoken`
+- **Limite** : Nombre maximal de tokens configurable (défaut : 500 tokens) pour éviter les dépassements de limites de modèles externes
 
 ### 2. Fenêtre glissante (`sliding_window_filter`)
 - **Objectif** : Garder seulement les éléments les plus pertinents et récents

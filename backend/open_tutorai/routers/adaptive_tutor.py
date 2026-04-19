@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from open_webui.internal.db import get_db
 from open_webui.utils.auth import get_verified_user
+from open_tutorai.agents.adaptive_tutor_agent import AdaptiveTutorAgent
 from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG
 from open_tutorai.routers.context_retrieval import retrieve_pedagogical_documents
 
@@ -61,6 +62,14 @@ class VerificationSource(BaseModel):
     path: Optional[str] = None
 
 
+class StrategyDecision(BaseModel):
+    id: str
+    action: str
+    rationale: str
+    priority: int
+    dependencies: Optional[List[str]] = None
+
+
 class VerificationReport(BaseModel):
     verified: bool
     support_score: float
@@ -76,8 +85,10 @@ class AdaptiveTutorResponse(BaseModel):
     detected_difficulties: List[str]
     suggested_exercises: List[ExerciseSuggestion]
     strategy: List[str]
+    strategy_decisions: Optional[List[StrategyDecision]] = None
     priority_focus: List[str]
     verification: Optional[VerificationReport] = None
+    agent_trace: Optional[List[str]] = None
     notes: Optional[str] = None
 
 
@@ -473,48 +484,23 @@ async def create_adaptive_plan(
     db=Depends(get_db)
 ):
     try:
-        adjusted_level = assess_current_level(
-            request.current_level,
-            request.recent_interactions,
-            request.feedback_comments,
+        agent = AdaptiveTutorAgent(
+            user_id=user.id,
+            request_data=request.dict(),
+            db=db,
         )
-
-        difficulties = detect_difficulties(
-            request.topic,
-            request.recent_interactions,
-            request.feedback_comments,
-            request.learning_objectives,
-        )
-
-        exercises = generate_exercises(
-            topic=request.topic,
-            level=adjusted_level,
-            learning_objectives=request.learning_objectives,
-            preferred_exercise_types=request.preferred_exercise_types,
-            count=3,
-        )
-
-        strategy = plan_learning_strategy(
-            request.topic,
-            adjusted_level,
-            difficulties,
-            request.feedback_comments,
-        )
-
-        verification_report = await verify_adaptive_tutor_output(
-            user.id,
-            request,
-            exercises,
-            strategy,
-        )
+        state = await agent.run()
 
         return {
-            "adjusted_level": adjusted_level,
-            "detected_difficulties": difficulties,
-            "suggested_exercises": [ExerciseSuggestion(**exercise) for exercise in exercises],
-            "strategy": strategy,
-            "priority_focus": difficulties or [f"Renforcer {request.topic}"],
-            "verification": verification_report,
+            "adjusted_level": state.adjusted_level,
+            "detected_difficulties": state.difficulties,
+            "suggested_exercises": [ExerciseSuggestion(**exercise) for exercise in state.suggested_exercises],
+            "strategy": state.strategy,
+            "strategy_decisions": state.strategy_decisions,
+            "priority_focus": state.priority_focus or [f"Renforcer {request.topic}"],
+            "verification": state.tool_results.get("verification"),
+            "agent_trace": state.agent_trace,
+            "notes": " ".join(state.reflection_notes) if state.reflection_notes else None,
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Adaptive tutor plan failed: {str(exc)}")
