@@ -13,6 +13,9 @@ from open_tutorai.models.database import Support, SupportFile, Base
 from sqlalchemy.orm import sessionmaker
 from open_webui.internal.db import engine
 
+# Import ChromaDB indexing function
+from open_tutorai.routers.context_retrieval import index_uploaded_document_to_chromadb
+
 # Setup logging
 log = logging.getLogger(__name__)
 log.setLevel("INFO")
@@ -195,7 +198,21 @@ async def upload_support_file(
         try:
             session.add(file_record)
             session.commit()
-            return {"id": file_id, "filename": file.filename, "status": "success"}
+            
+            # Index the uploaded document in ChromaDB for RAG
+            user_id = user.id if user else "anonymous"
+            index_success = index_uploaded_document_to_chromadb(
+                file_path=save_path,
+                user_id=user_id,
+                title=file.filename
+            )
+            
+            if index_success:
+                log.info(f"Successfully indexed uploaded document: {file.filename}")
+            else:
+                log.warning(f"Failed to index uploaded document: {file.filename}")
+            
+            return {"id": file_id, "filename": file.filename, "status": "success", "indexed": index_success}
         finally:
             session.close()
             

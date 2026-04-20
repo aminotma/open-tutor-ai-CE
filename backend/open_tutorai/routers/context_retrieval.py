@@ -22,6 +22,9 @@ import re
 import tiktoken
 from pathlib import Path
 
+import chromadb
+from chromadb.config import Settings
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -30,6 +33,178 @@ from open_webui.utils.auth import get_verified_user
 from open_tutorai.models.database import Memory
 
 router = APIRouter(tags=["context"])
+
+# ============================================================================
+# CHROMADB SETUP
+# ============================================================================
+
+# Initialize ChromaDB client
+chroma_client = chromadb.PersistentClient(
+    path="data/vector_db",
+    settings=Settings(anonymized_telemetry=False)
+)
+
+# Collection for pedagogical documents
+DOCUMENTS_COLLECTION = "pedagogical_documents"
+
+def get_or_create_collection(collection_name: str):
+    """Get or create a ChromaDB collection"""
+    try:
+        return chroma_client.get_collection(name=collection_name)
+    except Exception:
+        return chroma_client.create_collection(name=collection_name)
+
+# ============================================================================
+# DOCUMENT INDEXING FUNCTIONS
+# ============================================================================
+
+def index_document_to_chromadb(
+    doc_id: str,
+    content: str,
+    metadata: Dict[str, Any],
+    collection_name: str = DOCUMENTS_COLLECTION
+) -> bool:
+    """
+    Index a document into ChromaDB for vector search
+    
+    Args:
+        doc_id: Unique identifier for the document
+        content: Full text content of the document
+        metadata: Metadata dictionary (title, path, user_id, etc.)
+        collection_name: ChromaDB collection name
+    
+    Returns:
+        bool: True if successfully indexed
+    """
+    try:
+        collection = get_or_create_collection(collection_name)
+        
+        # Prepare metadata for ChromaDB (must be strings)
+        chroma_metadata = {}
+        for key, value in metadata.items():
+            if isinstance(value, (str, int, float)):
+                chroma_metadata[key] = str(value)
+            else:
+                chroma_metadata[key] = json.dumps(value)
+        
+        # Add document to collection
+        collection.add(
+            documents=[content],
+            metadatas=[chroma_metadata],
+            ids=[doc_id]
+        )
+        
+        return True
+    except Exception as e:
+        print(f"Error indexing document {doc_id}: {str(e)}")
+        return False
+
+def index_local_documents_to_chromadb(
+    base_paths: List[str] = None,
+    collection_name: str = DOCUMENTS_COLLECTION
+) -> int:
+    """
+    Index all local documents from specified paths into ChromaDB
+    
+    Args:
+        base_paths: List of directory paths to index (default: ["docs", "backend"])
+        collection_name: ChromaDB collection name
+    
+    Returns:
+        int: Number of documents indexed
+    """
+    if base_paths is None:
+        base_paths = ["docs", "backend"]
+    
+    collection = get_or_create_collection(collection_name)
+    indexed_count = 0
+    repo_root = Path(__file__).resolve().parents[4]
+    
+    for base_path_str in base_paths:
+        base_path = repo_root / base_path_str
+        if not base_path.exists():
+            continue
+            
+        for root, _, files in os.walk(base_path):
+            for file_name in files:
+                if not file_name.lower().endswith(('.md', '.txt', '.json')):
+                    continue
+                    
+                file_path = Path(root) / file_name
+                text = _read_text_file(file_path)
+                
+                if not text or len(text.strip()) < 50:  # Skip empty/short files
+                    continue
+                
+                doc_id = str(file_path.relative_to(repo_root))
+                
+                # Check if already indexed
+                try:
+                    existing = collection.get(ids=[doc_id])
+                    if existing['ids']:
+                        continue  # Already indexed
+                except Exception:
+                    pass  # Not indexed yet
+                
+                metadata = {
+                    "title": file_name,
+                    "path": str(file_path.relative_to(repo_root)),
+                    "source": "local_document",
+                    "file_type": file_path.suffix,
+                    "indexed_at": datetime.now(timezone.utc).isoformat()
+                }
+                
+                if index_document_to_chromadb(doc_id, text, metadata, collection_name):
+                    indexed_count += 1
+    
+    return indexed_count
+
+def index_uploaded_document_to_chromadb(
+    file_path: str,
+    user_id: str,
+    title: str = None,
+    collection_name: str = DOCUMENTS_COLLECTION
+) -> bool:
+    """
+    Index an uploaded document into ChromaDB
+    
+    Args:
+        file_path: Path to the uploaded file
+        user_id: User ID who uploaded the document
+        title: Document title (optional, defaults to filename)
+        collection_name: ChromaDB collection name
+    
+    Returns:
+        bool: True if successfully indexed
+    """
+    try:
+        path_obj = Path(file_path)
+        if not path_obj.exists():
+            return False
+            
+        text = _read_text_file(path_obj)
+        if not text:
+            return False
+        
+        doc_id = f"upload_{user_id}_{path_obj.name}_{uuid4().hex[:8]}"
+        
+        if not title:
+            title = path_obj.stem
+        
+        metadata = {
+            "title": title,
+            "path": str(path_obj),
+            "source": "uploaded_document",
+            "user_id": user_id,
+            "file_type": path_obj.suffix,
+            "uploaded_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        return index_document_to_chromadb(doc_id, text, metadata, collection_name)
+        
+    except Exception as e:
+        print(f"Error indexing uploaded document {file_path}: {str(e)}")
+        return False
 
 
 # ============================================================================
@@ -316,11 +491,92 @@ async def retrieve_pedagogical_documents(
     top_k: int = 5
 ) -> List[Dict]:
     """
-    Retrieve pedagogical documents using RAG (Retrieval-Augmented Generation)
+    Retrieve pedagogical documents using ChromaDB vector search
+    
+    This implementation uses vector similarity search over indexed documents
+    in ChromaDB. Documents are automatically indexed from local directories
+    and uploaded files.
+    
+    Args:
+        user_id: User ID for filtering (future use)
+        query: Search query
+        top_k: Number of top results to return
+    
+    Returns:
+        List of document dictionaries with metadata and scores
+    """
+    try:
+        if not query or not query.strip():
+            return []
+        
+        # Ensure local documents are indexed (lazy indexing)
+        indexed_count = index_local_documents_to_chromadb()
+        if indexed_count > 0:
+            print(f"Indexed {indexed_count} new local documents")
+        
+        # Get collection and perform vector search
+        collection = get_or_create_collection(DOCUMENTS_COLLECTION)
+        
+        # Query the collection
+        results = collection.query(
+            query_texts=[query],
+            n_results=top_k,
+            include=['documents', 'metadatas', 'distances']
+        )
+        
+        documents = []
+        if results['ids'] and results['ids'][0]:
+            for i, doc_id in enumerate(results['ids'][0]):
+                distance = results['distances'][0][i] if results['distances'] else 0.5
+                metadata = results['metadatas'][0][i] if results['metadatas'] else {}
+                content = results['documents'][0][i] if results['documents'] else ""
+                
+                # Convert distance to similarity score (ChromaDB returns cosine distance)
+                # Lower distance = higher similarity
+                vector_score = max(0.0, 1.0 - distance)
+                
+                # Parse metadata back from strings
+                parsed_metadata = {}
+                for key, value in metadata.items():
+                    try:
+                        parsed_metadata[key] = json.loads(value)
+                    except (json.JSONDecodeError, TypeError):
+                        parsed_metadata[key] = value
+                
+                documents.append({
+                    "id": doc_id,
+                    "source_type": "rag",
+                    "content": content,
+                    "metadata": {
+                        "title": parsed_metadata.get("title", doc_id),
+                        "path": parsed_metadata.get("path", ""),
+                        "source": parsed_metadata.get("source", "unknown"),
+                        "file_type": parsed_metadata.get("file_type", ""),
+                        "user_id": parsed_metadata.get("user_id", ""),
+                        "indexed_at": parsed_metadata.get("indexed_at", ""),
+                        "uploaded_at": parsed_metadata.get("uploaded_at", "")
+                    },
+                    "relevance_score": vector_score,
+                    "vector_score": vector_score
+                })
+        
+        return documents
+        
+    except Exception as e:
+        print(f"Error retrieving pedagogical documents: {str(e)}")
+        # Fallback to file-walk if ChromaDB fails
+        return await _retrieve_pedagogical_documents_fallback(user_id, query, top_k)
 
-    This implementation uses a document fallback search over local repository
-    educational content and metadata. It returns documents that contain query
-    terms and can be used to verify tutor outputs against verified sources.
+async def _retrieve_pedagogical_documents_fallback(
+    user_id: str,
+    query: str,
+    top_k: int = 5
+) -> List[Dict]:
+    """
+    Fallback retrieval using file-walk when ChromaDB is unavailable
+    
+    This maintains backward compatibility and ensures the system works
+    even if vector search fails.
     """
     try:
         if not query or not query.strip():
@@ -346,7 +602,6 @@ async def retrieve_pedagogical_documents(
                     if relevance_score <= 0:
                         continue
 
-                    preview = " ".join(text.replace("\n", " ").split())[:400]
                     documents.append({
                         "id": str(file_path.relative_to(repo_root)),
                         "source_type": "rag",
@@ -363,7 +618,7 @@ async def retrieve_pedagogical_documents(
         return documents[:top_k]
 
     except Exception as e:
-        print(f"Error retrieving pedagogical documents: {str(e)}")
+        print(f"Error in fallback retrieval: {str(e)}")
         return []
 
 
@@ -1104,3 +1359,78 @@ async def get_context_stats(
         
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+@router.post("/context/index-local-documents")
+async def index_local_documents_endpoint(
+    user=Depends(get_verified_user)
+):
+    """
+    Manually trigger indexing of local documents into ChromaDB
+    
+    This endpoint allows administrators to re-index local documents
+    if the collection becomes out of sync.
+    """
+    try:
+        indexed_count = index_local_documents_to_chromadb()
+        
+        return {
+            "status": "success",
+            "indexed_count": indexed_count,
+            "message": f"Indexed {indexed_count} local documents into ChromaDB"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to index documents: {str(e)}")
+
+@router.delete("/context/reset-vector-db")
+async def reset_vector_database(
+    user=Depends(get_verified_user)
+):
+    """
+    Reset the ChromaDB vector database
+    
+    This removes all indexed documents and recreates the collection.
+    Use with caution as it will remove all vector indexes.
+    """
+    try:
+        # Delete the collection
+        try:
+            chroma_client.delete_collection(name=DOCUMENTS_COLLECTION)
+        except Exception:
+            pass  # Collection might not exist
+        
+        # Recreate the collection
+        collection = chroma_client.create_collection(name=DOCUMENTS_COLLECTION)
+        
+        return {
+            "status": "success",
+            "message": f"Reset ChromaDB collection '{DOCUMENTS_COLLECTION}'"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to reset vector database: {str(e)}")
+
+@router.get("/context/vector-db-stats")
+async def get_vector_db_stats(
+    user=Depends(get_verified_user)
+):
+    """
+    Get statistics about the ChromaDB vector database
+    """
+    try:
+        collection = get_or_create_collection(DOCUMENTS_COLLECTION)
+        count = collection.count()
+        
+        return {
+            "collection_name": DOCUMENTS_COLLECTION,
+            "document_count": count,
+            "status": "active"
+        }
+        
+    except Exception as e:
+        return {
+            "collection_name": DOCUMENTS_COLLECTION,
+            "document_count": 0,
+            "status": "error",
+            "error": str(e)
+        }
