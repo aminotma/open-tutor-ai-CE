@@ -1,3 +1,4 @@
+# AdaptiveTutorAgent: un agent de tutorat adaptatif avec routage dynamique et vérification RAG
 from __future__ import annotations
 
 import difflib
@@ -18,7 +19,7 @@ from open_tutorai.routers.context_retrieval import (
     retrieve_pedagogical_documents,
 )
 
-NEGATIVE_FEEDBACK_KEYWORDS = [
+negative_feedback_keywords = [
     "confused",
     "hard",
     "difficult",
@@ -32,6 +33,13 @@ NEGATIVE_FEEDBACK_KEYWORDS = [
 ]
 
 LEVEL_ORDER = ["beginner", "intermediate", "advanced"]
+
+# ─── Routing constants ────────────────────────────────────────────────────────
+# Maximum iterations the dynamic router is allowed to run before it stops.
+MAX_ROUTING_ITERATIONS = 8
+# Minimum RAG verification score required for the CollaborationAgent to
+# declare consensus.  Below this threshold a corrective iteration is triggered.
+CONSENSUS_THRESHOLD = 0.65
 
 
 def _normalize_level(level: Optional[str]) -> str:
@@ -426,6 +434,16 @@ class AdaptiveTutorState:
     tool_results: Dict[str, Any] = field(default_factory=dict)
     reflection_notes: List[str] = field(default_factory=list)
 
+    # ── Dynamic routing state ────────────────────────────────────────────────
+    # The next agent the router should call.  None signals "done".
+    next_agent: Optional[str] = None
+    # How many routing iterations have already run (circuit-breaker guard).
+    routing_iterations: int = 0
+    # Whether the CollaborationAgent has validated a final consensus.
+    consensus_reached: bool = False
+    # Corrective iterations requested by CollaborationAgent.
+    corrective_cycles: int = 0
+
 
 class BaseAgent:
     def __init__(self, state: AdaptiveTutorState):
@@ -435,110 +453,100 @@ class BaseAgent:
         raise NotImplementedError
 
 
-class PerceptionAgent(BaseAgent):
-    def __init__(self, state: AdaptiveTutorState, db):
-        super().__init__(state)
-        self.db = db
-
-    async def act(self) -> None:
-        self.state.agent_trace.append("PerceptionAgent: collecte la mémoire et le contexte pédagogique.")
-        query = self.state.topic
-        if self.state.learning_objectives:
-            query += " " + " ".join(self.state.learning_objectives)
-
-        self.state.memory_context = await retrieve_internal_memory(
-            self.state.user_id,
-            query,
-            memory_types=CONTEXT_RETRIEVAL_CONFIG["memory"]["memory_types"],
-            limit=CONTEXT_RETRIEVAL_CONFIG["memory"]["top_k_memories"],
-            db=self.db,
-        )
-
-        self.state.pedagogical_context = await retrieve_pedagogical_documents(
-            self.state.user_id,
-            query,
-            top_k=CONTEXT_RETRIEVAL_CONFIG["rag"]["top_k_documents"],
-        )
-        self.state.agent_trace.append(
-            f"PerceptionAgent: trouvé {len(self.state.memory_context)} items mémoire, {len(self.state.pedagogical_context)} documents pédagogiques."
-        )
-
-
-class DiagnosisAgent(BaseAgent):
-    async def act(self) -> None:
-        self.state.agent_trace.append("DiagnosisAgent: évalue le niveau et identifie les difficultés.")
-        self.state.adjusted_level = _assess_current_level(
-            self.state.current_level,
-            self.state.recent_interactions,
-            self.state.feedback_comments,
-        )
-        self.state.difficulties = _detect_difficulties(
-            self.state.topic,
-            self.state.recent_interactions,
-            self.state.feedback_comments,
-            self.state.learning_objectives,
-        )
-        self.state.difficulties.extend(_extract_memory_signals(self.state.topic, self.state.memory_context))
-        if not self.state.difficulties:
-            self.state.difficulties = [f"Aucun point critique détecté pour {self.state.topic}."]
-        self.state.priority_focus = self.state.difficulties[:3]
-        self.state.agent_trace.append(
-            f"DiagnosisAgent: niveau ajusté à {self.state.adjusted_level}, difficultés évaluées."
-        )
-
-
-class PlanningAgent(BaseAgent):
-    async def act(self) -> None:
-        self.state.agent_trace.append("PlanningAgent: décompose le plan en sous-tâches concrètes.")
-        self.state.tasks = [
-            "Analyser l'état de l'apprenant et récupérer le contexte disponible.",
-            "Identifier les difficultés principales et le niveau adapté.",
-            "Construire une stratégie pédagogique claire et priorisée.",
-            "Générer des exercices ciblés et des indications.",
-            "Vérifier les résultats par rapport aux sources RAG.",
-            "Réviser le plan si la vérification révèle des écarts.",
-        ]
-        self.state.strategy_decisions = _plan_learning_strategy(
-            self.state.topic,
-            self.state.adjusted_level,
-            self.state.difficulties,
-            self.state.feedback_comments,
-            self.state.memory_context,
-        )
-        self.state.strategy = [decision["action"] for decision in self.state.strategy_decisions]
-        self.state.agent_trace.extend(
-            [f"PlanningAgent: tâche ajoutée -> {task}" for task in self.state.tasks]
-        )
-
-
-class ExerciseAgent(BaseAgent):
-    def __init__(self, state: AdaptiveTutorState, tool_agent: ToolAgent):
-        super().__init__(state)
-        self.tool_agent = tool_agent
-
-    async def act(self) -> None:
-        self.state.agent_trace.append("ExerciseAgent: génère des exercices correspondants à la stratégie.")
-        self.state.suggested_exercises = _generate_exercises(
-            topic=self.state.topic,
-            level=self.state.adjusted_level,
-            learning_objectives=self.state.learning_objectives,
-            count=3,
-        )
-        self.state.agent_trace.append(
-            f"ExerciseAgent: {len(self.state.suggested_exercises)} exercices générés."
-        )
-        self.state.tool_results["exercise_generation"] = {
-            "exercise_count": len(self.state.suggested_exercises)
-        }
-
+# ─────────────────────────────────────────────────────────────────────────────
+# ToolAgent  (real web search + API calls + sandboxed exec)
+# ─────────────────────────────────────────────────────────────────────────────
 
 class ToolAgent(BaseAgent):
+    """
+    Provides concrete tool capabilities to every other agent.
+
+    web_search now performs a real HTTP call via the DuckDuckGo Instant
+    Answer API (no API key required).  Results are returned as a concise
+    plain-text summary so callers can embed them directly into prompts or
+    use them to enrich the pedagogical context.
+    """
+
+    # DuckDuckGo Instant Answer endpoint – no auth required, CORS-friendly.
+    _DDG_API = "https://api.duckduckgo.com/"
+
     def __init__(self, state: AdaptiveTutorState):
         super().__init__(state)
 
-    def web_search(self, query: str) -> str:
-        self.state.agent_trace.append(f"ToolAgent: recherche web pour '{query}'.")
-        return f"Recherche web simulée pour '{query}' (outil externe non configuré)."
+    # ── Public tool interface ─────────────────────────────────────────────
+
+    def web_search(self, query: str, max_results: int = 5) -> str:
+        """
+        Executes a real web search using the DuckDuckGo Instant Answer API.
+
+        Returns a human-readable summary (abstract + up to *max_results*
+        related topics) so callers can splice the text directly into
+        prompts or strategy notes.
+        """
+        self.state.agent_trace.append(f"ToolAgent: recherche web réelle pour '{query}'.")
+        try:
+            response = requests.get(
+                self._DDG_API,
+                params={
+                    "q": query,
+                    "format": "json",
+                    "no_html": "1",
+                    "skip_disambig": "1",
+                },
+                timeout=8,
+                headers={"User-Agent": "OpenTutorAI/1.0 (educational platform)"},
+            )
+            response.raise_for_status()
+            data = response.json()
+        except requests.RequestException as exc:
+            error_msg = f"Recherche web échouée : {exc}"
+            self.state.agent_trace.append(f"ToolAgent: {error_msg}")
+            self.state.tool_results["web_search_error"] = str(exc)
+            return error_msg
+
+        parts: List[str] = []
+
+        # Abstract (instant answer text)
+        abstract = data.get("AbstractText", "").strip()
+        if abstract:
+            parts.append(abstract)
+
+        # Answer (short one-liner like a unit conversion)
+        answer = data.get("Answer", "").strip()
+        if answer and answer != abstract:
+            parts.append(f"Réponse directe : {answer}")
+
+        # Related topics (up to max_results)
+        related = data.get("RelatedTopics", [])
+        seen: set = set()
+        for item in related:
+            if len(seen) >= max_results:
+                break
+            # RelatedTopics can be nested (sub-topics have a "Topics" key)
+            if "Topics" in item:
+                for sub in item["Topics"]:
+                    text = sub.get("Text", "").strip()
+                    if text and text not in seen:
+                        parts.append(f"• {text}")
+                        seen.add(text)
+                        if len(seen) >= max_results:
+                            break
+            else:
+                text = item.get("Text", "").strip()
+                if text and text not in seen:
+                    parts.append(f"• {text}")
+                    seen.add(text)
+
+        if not parts:
+            result = f"Aucun résultat exploitable trouvé pour '{query}'."
+        else:
+            result = "\n".join(parts)
+
+        self.state.tool_results["web_search"] = {"query": query, "summary": result}
+        self.state.agent_trace.append(
+            f"ToolAgent: recherche terminée, {len(parts)} fragment(s) récupéré(s)."
+        )
+        return result
 
     def call_api(
         self,
@@ -597,6 +605,170 @@ class ToolAgent(BaseAgent):
             sys.stdout = original_stdout
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Perception
+# ─────────────────────────────────────────────────────────────────────────────
+
+class PerceptionAgent(BaseAgent):
+    def __init__(self, state: AdaptiveTutorState, db):
+        super().__init__(state)
+        self.db = db
+
+    async def act(self) -> None:
+        self.state.agent_trace.append("PerceptionAgent: collecte la mémoire et le contexte pédagogique.")
+        query = self.state.topic
+        if self.state.learning_objectives:
+            query += " " + " ".join(self.state.learning_objectives)
+
+        self.state.memory_context = await retrieve_internal_memory(
+            self.state.user_id,
+            query,
+            memory_types=CONTEXT_RETRIEVAL_CONFIG["memory"]["memory_types"],
+            limit=CONTEXT_RETRIEVAL_CONFIG["memory"]["top_k_memories"],
+            db=self.db,
+        )
+
+        self.state.pedagogical_context = await retrieve_pedagogical_documents(
+            self.state.user_id,
+            query,
+            top_k=CONTEXT_RETRIEVAL_CONFIG["rag"]["top_k_documents"],
+        )
+        self.state.agent_trace.append(
+            f"PerceptionAgent: trouvé {len(self.state.memory_context)} items mémoire, "
+            f"{len(self.state.pedagogical_context)} documents pédagogiques."
+        )
+        # Route → diagnosis
+        self.state.next_agent = "diagnosis"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Diagnosis
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DiagnosisAgent(BaseAgent):
+    async def act(self) -> None:
+        self.state.agent_trace.append("DiagnosisAgent: évalue le niveau et identifie les difficultés.")
+        self.state.adjusted_level = _assess_current_level(
+            self.state.current_level,
+            self.state.recent_interactions,
+            self.state.feedback_comments,
+        )
+        self.state.difficulties = _detect_difficulties(
+            self.state.topic,
+            self.state.recent_interactions,
+            self.state.feedback_comments,
+            self.state.learning_objectives,
+        )
+        self.state.difficulties.extend(_extract_memory_signals(self.state.topic, self.state.memory_context))
+        if not self.state.difficulties:
+            self.state.difficulties = [f"Aucun point critique détecté pour {self.state.topic}."]
+        self.state.priority_focus = self.state.difficulties[:3]
+        self.state.agent_trace.append(
+            f"DiagnosisAgent: niveau ajusté à {self.state.adjusted_level}, difficultés évaluées."
+        )
+        # Route → planning
+        self.state.next_agent = "planning"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Planning  (now emits dynamic next_agent based on context)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class PlanningAgent(BaseAgent):
+    """
+    Builds the learning strategy *and* decides which agent should run next.
+
+    Decision rules
+    ──────────────
+    1. If no pedagogical documents were retrieved → enrich with a web search
+       first (routes to ToolAgent / web_search flow) then back to exercise.
+    2. If this is a corrective cycle (state.corrective_cycles > 0) → skip
+       straight to exercise regeneration with a narrower focus.
+    3. Default → exercise generation.
+    """
+
+    async def act(self) -> None:
+        self.state.agent_trace.append("PlanningAgent: décompose le plan en sous-tâches concrètes.")
+        self.state.tasks = [
+            "Analyser l'état de l'apprenant et récupérer le contexte disponible.",
+            "Identifier les difficultés principales et le niveau adapté.",
+            "Construire une stratégie pédagogique claire et priorisée.",
+            "Générer des exercices ciblés et des indications.",
+            "Vérifier les résultats par rapport aux sources RAG.",
+            "Réviser le plan si la vérification révèle des écarts.",
+        ]
+        self.state.strategy_decisions = _plan_learning_strategy(
+            self.state.topic,
+            self.state.adjusted_level,
+            self.state.difficulties,
+            self.state.feedback_comments,
+            self.state.memory_context,
+        )
+        self.state.strategy = [decision["action"] for decision in self.state.strategy_decisions]
+        self.state.agent_trace.extend(
+            [f"PlanningAgent: tâche ajoutée -> {task}" for task in self.state.tasks]
+        )
+
+        # ── Dynamic routing decision ──────────────────────────────────────
+        if not self.state.pedagogical_context and self.state.corrective_cycles == 0:
+            # No RAG sources available: enrich via web search before generating exercises.
+            self.state.agent_trace.append(
+                "PlanningAgent: aucun document RAG disponible → enrichissement web avant exercices."
+            )
+            self.state.next_agent = "web_enrichment"
+        elif self.state.corrective_cycles > 0:
+            # Corrective cycle: re-generate exercises with refined focus.
+            self.state.agent_trace.append(
+                f"PlanningAgent: cycle correctif #{self.state.corrective_cycles} → re-génération ciblée des exercices."
+            )
+            self.state.next_agent = "exercise"
+        else:
+            self.state.next_agent = "exercise"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Exercise
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ExerciseAgent(BaseAgent):
+    def __init__(self, state: AdaptiveTutorState, tool_agent: ToolAgent):
+        super().__init__(state)
+        self.tool_agent = tool_agent
+
+    async def act(self) -> None:
+        self.state.agent_trace.append("ExerciseAgent: génère des exercices correspondants à la stratégie.")
+
+        # On corrective cycles narrow the focus to unsupported items only.
+        objectives = self.state.learning_objectives
+        if self.state.corrective_cycles > 0:
+            unsupported = self.state.tool_results.get("verification", {}).get("unsupported_items", [])
+            if unsupported:
+                # Re-use unsupported exercise questions as new objectives.
+                objectives = [item[:120] for item in unsupported[:3]]
+                self.state.agent_trace.append(
+                    "ExerciseAgent: re-génération ciblée sur les éléments non validés par RAG."
+                )
+
+        self.state.suggested_exercises = _generate_exercises(
+            topic=self.state.topic,
+            level=self.state.adjusted_level,
+            learning_objectives=objectives,
+            count=3,
+        )
+        self.state.agent_trace.append(
+            f"ExerciseAgent: {len(self.state.suggested_exercises)} exercices générés."
+        )
+        self.state.tool_results["exercise_generation"] = {
+            "exercise_count": len(self.state.suggested_exercises)
+        }
+        # Route → verification
+        self.state.next_agent = "verification"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Verification
+# ─────────────────────────────────────────────────────────────────────────────
+
 class VerificationAgent(BaseAgent):
     async def act(self) -> None:
         self.state.agent_trace.append("VerificationAgent: vérifie les résultats générés avec le système RAG.")
@@ -611,9 +783,16 @@ class VerificationAgent(BaseAgent):
         )
         self.state.tool_results["verification"] = verification
         self.state.agent_trace.append(
-            f"VerificationAgent: verdict = {verification.get('verdict')}, score = {verification.get('support_score')}"
+            f"VerificationAgent: verdict = {verification.get('verdict')}, "
+            f"score = {verification.get('support_score')}"
         )
+        # Route → reflection
+        self.state.next_agent = "reflection"
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reflection
+# ─────────────────────────────────────────────────────────────────────────────
 
 class ReflectionAgent(BaseAgent):
     def __init__(self, state: AdaptiveTutorState, db):
@@ -640,6 +819,8 @@ class ReflectionAgent(BaseAgent):
             "Le système conserve les résultats et peut enregistrer une mémoire d'apprentissage si nécessaire."
         )
         await self._persist_reflection_memory()
+        # Route → collaboration (consensus check)
+        self.state.next_agent = "collaboration"
 
     async def _persist_reflection_memory(self) -> None:
         if not self.db:
@@ -647,7 +828,8 @@ class ReflectionAgent(BaseAgent):
 
         verification = self.state.tool_results.get("verification", {})
         summary = (
-            f"Agent reflection: niveau {self.state.adjusted_level}, difficultés {', '.join(self.state.difficulties[:3])}. "
+            f"Agent reflection: niveau {self.state.adjusted_level}, "
+            f"difficultés {', '.join(self.state.difficulties[:3])}. "
             f"Vérification : {verification.get('verdict', 'inconnu')}."
         )
         memory = Memory(
@@ -688,33 +870,131 @@ class ReflectionAgent(BaseAgent):
                 self.db.delete(memory)
             self.db.commit()
             self.state.agent_trace.append(
-                f"ReflectionAgent: consolidation de mémoire effectuée, {len(memories) - 40} éléments supprimés."
+                f"ReflectionAgent: consolidation de mémoire effectuée, "
+                f"{len(memories) - 40} éléments supprimés."
             )
         except Exception:
             self.db.rollback()
             self.state.agent_trace.append("ReflectionAgent: échec de la consolidation de la mémoire.")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Collaboration  (active consensus + corrective loop)
+# ─────────────────────────────────────────────────────────────────────────────
+
 class CollaborationAgent(BaseAgent):
+    """
+    Evaluates agent outputs and decides whether to:
+      • declare consensus (stop the loop), or
+      • trigger a corrective cycle (re-plan → re-generate → re-verify).
+
+    Consensus criteria
+    ──────────────────
+    1. RAG verification score ≥ CONSENSUS_THRESHOLD, OR verification is
+       disabled (score defaults to 0 but verdict is "verification_disabled").
+    2. At least one exercise was generated.
+    3. corrective_cycles has not exceeded MAX_CORRECTIVE_CYCLES (= 2) to
+       prevent infinite loops.
+    """
+
+    MAX_CORRECTIVE_CYCLES = 2
+
     def __init__(self, state: AdaptiveTutorState, agents: List[BaseAgent]):
         super().__init__(state)
         self.agents = agents
 
     async def act(self) -> None:
-        self.state.agent_trace.append("CollaborationAgent: synthétise l'avis des différents agents.")
+        self.state.agent_trace.append(
+            "CollaborationAgent: évalue le consensus entre les agents."
+        )
         roles = [agent.__class__.__name__ for agent in self.agents]
-        self.state.agent_trace.append(f"CollaborationAgent: agents impliqués = {', '.join(roles)}.")
-        if self.state.tool_results.get("verification", {}).get("verified") is False:
-            self.state.agent_trace.append(
-                "CollaborationAgent: consensus de correction requis après vérification."
-            )
-        else:
-            self.state.agent_trace.append(
-                "CollaborationAgent: consensus atteint, la solution est cohérente avec les sources disponibles."
-            )
+        self.state.agent_trace.append(
+            f"CollaborationAgent: agents impliqués = {', '.join(roles)}."
+        )
 
+        verification = self.state.tool_results.get("verification", {})
+        support_score: float = verification.get("support_score", 0.0)
+        verdict: str = verification.get("verdict", "unknown")
+        exercise_count: int = self.state.tool_results.get(
+            "exercise_generation", {}
+        ).get("exercise_count", 0)
+
+        # ── Consensus evaluation ──────────────────────────────────────────
+        verification_ok = (
+            support_score >= CONSENSUS_THRESHOLD
+            or verdict == "verification_disabled"
+            or verdict == "no_sources_found"   # No local RAG; we cannot block indefinitely.
+        )
+        exercises_ok = exercise_count > 0
+
+        if verification_ok and exercises_ok:
+            self.state.consensus_reached = True
+            self.state.next_agent = None  # Signals the router to stop.
+            self.state.agent_trace.append(
+                f"CollaborationAgent: consensus atteint (score={support_score:.2f}, "
+                f"exercices={exercise_count}). Boucle terminée."
+            )
+            return
+
+        # ── No consensus: attempt a corrective cycle ──────────────────────
+        if self.state.corrective_cycles >= self.MAX_CORRECTIVE_CYCLES:
+            # Safety valve: too many corrections, stop anyway.
+            self.state.consensus_reached = False
+            self.state.next_agent = None
+            self.state.agent_trace.append(
+                f"CollaborationAgent: nombre maximum de cycles correctifs atteint "
+                f"({self.MAX_CORRECTIVE_CYCLES}). Arrêt forcé."
+            )
+            return
+
+        self.state.corrective_cycles += 1
+        self.state.agent_trace.append(
+            f"CollaborationAgent: consensus non atteint (score={support_score:.2f}, "
+            f"exercices={exercise_count}). "
+            f"Déclenchement du cycle correctif #{self.state.corrective_cycles}."
+        )
+
+        # Build a corrective rationale for the planning agent.
+        issues: List[str] = []
+        if not verification_ok:
+            unsupported = verification.get("unsupported_items", [])
+            issues.append(
+                f"Score RAG insuffisant ({support_score:.0%}). "
+                f"Éléments non validés : {', '.join(unsupported[:3])}."
+            )
+        if not exercises_ok:
+            issues.append("Aucun exercice généré.")
+
+        self.state.strategy.append(
+            f"[Cycle correctif #{self.state.corrective_cycles}] {' | '.join(issues)} "
+            "→ Re-planification et re-génération ciblée requises."
+        )
+        # Route back to planning for a corrective pass.
+        self.state.next_agent = "planning"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Orchestrator  (dynamic router)
+# ─────────────────────────────────────────────────────────────────────────────
 
 class AdaptiveTutorAgent:
+    """
+    Orchestrates all specialist agents through a dynamic routing loop.
+
+    Instead of a hard-coded sequential call chain, each agent sets
+    ``state.next_agent`` to the name of the agent that should run next.
+    The router dispatches accordingly until ``next_agent`` is ``None``
+    (consensus reached) or ``MAX_ROUTING_ITERATIONS`` is exceeded.
+
+    Special virtual node "web_enrichment"
+    ──────────────────────────────────────
+    When the planning agent decides the context is too thin, it routes to
+    the virtual "web_enrichment" node.  The router calls
+    ``ToolAgent.web_search`` directly, injects the result into the
+    state, then routes to "exercise".  This keeps the real agents lean
+    while making web search a first-class routing destination.
+    """
+
     def __init__(self, user_id: str, request_data: Dict[str, Any], db):
         self.state = AdaptiveTutorState(
             user_id=user_id,
@@ -726,6 +1006,8 @@ class AdaptiveTutorAgent:
             preferred_exercise_types=request_data.get("preferred_exercise_types", []) or [],
         )
         self.db = db
+
+        # Instantiate all agents.
         self.tool_agent = ToolAgent(self.state)
         self.perception_agent = PerceptionAgent(self.state, db)
         self.diagnosis_agent = DiagnosisAgent(self.state)
@@ -745,14 +1027,104 @@ class AdaptiveTutorAgent:
             ],
         )
 
+        # Name → agent lookup used by the router.
+        self._registry: Dict[str, BaseAgent] = {
+            "perception": self.perception_agent,
+            "diagnosis": self.diagnosis_agent,
+            "planning": self.planning_agent,
+            "exercise": self.exercise_agent,
+            "verification": self.verification_agent,
+            "reflection": self.reflection_agent,
+            "collaboration": self.collaboration_agent,
+        }
+
+    # ── Virtual node handler ──────────────────────────────────────────────
+
+    async def _handle_web_enrichment(self) -> None:
+        """
+        Performs a real web search to enrich the pedagogical context when
+        no local RAG documents are available, then routes to 'exercise'.
+        """
+        self.state.agent_trace.append(
+            "Router: nœud virtuel 'web_enrichment' — appel ToolAgent.web_search."
+        )
+        query = self.state.topic
+        if self.state.learning_objectives:
+            query += " " + " ".join(self.state.learning_objectives[:2])
+
+        search_result = self.tool_agent.web_search(query)
+
+        # Inject web result as a synthetic pedagogical document so
+        # downstream agents (VerificationAgent) can use it.
+        if search_result and "échouée" not in search_result:
+            synthetic_doc = {
+                "id": f"web_{uuid4().hex[:8]}",
+                "content": search_result,
+                "relevance_score": 0.5,
+                "metadata": {
+                    "title": f"Résultat web : {query}",
+                    "source": "web_search",
+                },
+            }
+            self.state.pedagogical_context.append(synthetic_doc)
+            self.state.agent_trace.append(
+                "Router: document web injecté dans le contexte pédagogique."
+            )
+
+        # Continue to exercise generation.
+        self.state.next_agent = "exercise"
+
+    # ── Main entry point ──────────────────────────────────────────────────
+
     async def run(self) -> AdaptiveTutorState:
-        self.state.agent_trace.append("AdaptiveTutorAgent: démarrage de la boucle agentique.")
-        await self.perception_agent.act()
-        await self.diagnosis_agent.act()
-        await self.planning_agent.act()
-        await self.exercise_agent.act()
-        await self.verification_agent.act()
-        await self.reflection_agent.act()
-        await self.collaboration_agent.act()
-        self.state.agent_trace.append("AdaptiveTutorAgent: boucle terminée.")
+        """
+        Runs the dynamic agentic loop.
+
+        Flow
+        ────
+        1. Kick off with 'perception' (always the entry point).
+        2. Each agent sets state.next_agent.
+        3. Router dispatches to the named agent (or virtual node).
+        4. Loop ends when next_agent is None or the iteration cap is hit.
+        """
+        self.state.agent_trace.append(
+            "AdaptiveTutorAgent: démarrage de la boucle agentique dynamique."
+        )
+        self.state.next_agent = "perception"
+
+        while (
+            self.state.next_agent is not None
+            and self.state.routing_iterations < MAX_ROUTING_ITERATIONS
+        ):
+            current = self.state.next_agent
+            self.state.routing_iterations += 1
+            self.state.agent_trace.append(
+                f"Router [iter {self.state.routing_iterations}]: dispatch → '{current}'."
+            )
+
+            if current == "web_enrichment":
+                await self._handle_web_enrichment()
+                continue
+
+            agent = self._registry.get(current)
+            if agent is None:
+                self.state.agent_trace.append(
+                    f"Router: agent inconnu '{current}', arrêt de la boucle."
+                )
+                break
+
+            await agent.act()
+
+        if self.state.routing_iterations >= MAX_ROUTING_ITERATIONS:
+            self.state.agent_trace.append(
+                f"AdaptiveTutorAgent: limite d'itérations ({MAX_ROUTING_ITERATIONS}) atteinte, "
+                "arrêt de sécurité."
+            )
+
+        self.state.agent_trace.append(
+            f"AdaptiveTutorAgent: boucle terminée "
+            f"({'consensus' if self.state.consensus_reached else 'sans consensus'}, "
+            f"{self.state.routing_iterations} itération(s), "
+            f"{self.state.corrective_cycles} cycle(s) correctif(s))."
+        )
         return self.state
