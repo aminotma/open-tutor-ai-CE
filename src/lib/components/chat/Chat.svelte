@@ -141,19 +141,63 @@
 	$: avatarActive =
 		($settings as any)?.avatarEnabled !== undefined ? ($settings as any).avatarEnabled : true;
 	let avatarSpeaking = false;
-	let currentAvatarMessage = '';
+	let currentContext = '';
+	let contextTokenCount = 0;
 
-	// Toggle avatar mode function
-	const toggleAvatar = () => {
-		// Update settings store and localStorage
-		settings.update((s) => {
-			const updatedSettings = { ...s };
-			(updatedSettings as any).avatarEnabled = !(($settings as any)?.avatarEnabled);
-			return updatedSettings;
-		});
-		// Save to localStorage for persistence
-		localStorage.setItem('settings', JSON.stringify($settings));
+	// Function to update context display
+	const updateContextDisplay = async () => {
+		try {
+			// Get the last user message as query
+			const messages = createMessagesList(history, history.currentId);
+			const lastUserMessage = messages.filter(m => m.role === 'user').pop();
+			
+			if (!lastUserMessage) {
+				currentContext = 'Aucun message utilisateur trouvé';
+				contextTokenCount = 0;
+				return;
+			}
+
+			// Call context retrieval API
+			const response = await fetch(`${TUTOR_BASE_URL}/api/context/retrieve`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'Authorization': `Bearer ${localStorage.token}`
+				},
+				body: JSON.stringify({
+					query: lastUserMessage.content,
+					max_results: 3
+				})
+			});
+
+			if (response.ok) {
+				const data = await response.json();
+				if (data && data.length > 0) {
+					// Combine the top context items
+					const contextTexts = data.map(item => item.full_content).join('\n\n');
+					currentContext = contextTexts.length > 500 ? contextTexts.substring(0, 500) + '...' : contextTexts;
+					
+					// Rough token count (4 chars per token approximation)
+					contextTokenCount = Math.floor(currentContext.length / 4);
+				} else {
+					currentContext = 'Aucun contexte trouvé';
+					contextTokenCount = 0;
+				}
+			} else {
+				currentContext = 'Erreur lors de la récupération du contexte';
+				contextTokenCount = 0;
+			}
+		} catch (error) {
+			console.error('Error updating context display:', error);
+			currentContext = 'Erreur lors de la récupération du contexte';
+			contextTokenCount = 0;
+		}
 	};
+
+	// Update context when chat changes
+	$: if ($chatId && history.currentId) {
+		updateContextDisplay();
+	}
 
 	$: if (chatIdProp) {
 		(async () => {
@@ -2371,6 +2415,7 @@
 										/>
 									</div>
 								</div>
+
 								<div class="w-full pt-2 bg-[#F5F7F9] dark:bg-gray-900 relative z-20">
 									<MessageInput
 										{history}
@@ -2451,30 +2496,44 @@
 				</div>
 			</Pane>
 
-			<ChatControls
-				bind:this={controlPaneComponent}
-				bind:history
-				bind:chatFiles
-				bind:params
-				bind:files
-				bind:pane={controlPane}
-				chatId={$chatId}
-				modelId={selectedModelIds?.at(0) ?? null}
-				models={selectedModelIds.reduce((a, e, i, arr) => {
-					const model = $models.find((m) => m.id === e);
-					if (model) {
-						return [...a, model];
-					}
-					return a;
-				}, [])}
-				{submitPrompt}
-				{stopResponse}
-				{showMessage}
-				{eventTarget}
-				{avatarActive}
-				onAvatarToggle={toggleAvatar}
-			/>
+			<PaneResizer />
+
+			<Pane defaultSize={50} class="h-full">
+				<ChatControls
+					bind:this={controlPaneComponent}
+					bind:history
+					bind:chatFiles
+					bind:params
+					bind:files
+					bind:pane={controlPane}
+					chatId={$chatId}
+					modelId={selectedModelIds?.at(0) ?? null}
+					models={selectedModelIds.reduce((a, e, i, arr) => {
+						const model = $models.find((m) => m.id === e);
+						if (model) {
+							return [...a, model];
+						}
+						return a;
+					}, [])}
+					{submitPrompt}
+					{stopResponse}
+					{showMessage}
+					{eventTarget}
+					{avatarActive}
+					onAvatarToggle={toggleAvatar}
+				/>
+			</Pane>
 		</PaneGroup>
+
+		<!-- Context Display Zone -->
+		<div class="fixed bottom-20 right-4 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg shadow-lg p-3 max-w-xs max-h-40 overflow-hidden z-30">
+			<div class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">
+				Contexte actuel ({contextTokenCount} tokens)
+			</div>
+			<div class="text-xs text-gray-600 dark:text-gray-400 overflow-y-auto max-h-24">
+				{currentContext || 'Aucun contexte disponible'}
+			</div>
+		</div>
 	{:else if loading}
 		<div class=" flex items-center justify-center h-full w-full">
 			<div class="m-auto">
