@@ -52,7 +52,13 @@ CONTEXT_RETRIEVAL_CONFIG = {
         "sliding_window_size": 10,
         "score_threshold": 0.3,
         "summarize_interactions": True,
-        "extract_key_elements": True
+        "extract_key_elements": True,
+        "forget_irrelevant": {
+            "enabled": True,
+            "context_threshold": 0.15,
+            "min_relevance": 0.1,
+            "sentence_match_ratio": 0.15
+        }
     },
     
     # Pedagogical Filtering

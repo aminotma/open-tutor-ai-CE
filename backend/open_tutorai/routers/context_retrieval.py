@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from open_webui.internal.db import get_db
 from open_webui.utils.auth import get_verified_user
+from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG
 from open_tutorai.models.database import Memory
 
 router = APIRouter(tags=["context"])
@@ -366,11 +367,11 @@ def extract_key_elements(content: str, query: str) -> str:
     """
     if not content or not query:
         return content
-    
+
     sentences = [s.strip() for s in content.split('.') if s.strip()]
     if not sentences:
         return content
-    
+
     query_terms = set(query.lower().split())
     
     # Score each sentence by query term matches
@@ -397,6 +398,63 @@ def extract_key_elements(content: str, query: str) -> str:
     return '. '.join(relevant_sentences)
 
 
+def forget_irrelevant_sentences(
+    content: str,
+    query: str,
+    min_match_ratio: float = 0.15
+) -> str:
+    """
+    Remove sentences from content that do not match the query well.
+    """
+    if not content or not query:
+        return content
+
+    sentences = [s.strip() for s in content.split('.') if s.strip()]
+    if not sentences:
+        return content
+
+    query_terms = set(query.lower().split())
+    if not query_terms:
+        return content
+
+    kept_sentences = []
+    for sentence in sentences:
+        sentence_lower = sentence.lower()
+        matches = sum(1 for term in query_terms if term in sentence_lower)
+        match_ratio = matches / len(query_terms)
+        if match_ratio >= min_match_ratio:
+            kept_sentences.append(sentence)
+
+    if not kept_sentences:
+        return content
+
+    return '. '.join(kept_sentences)
+
+
+def forget_irrelevant_context_items(
+    items: List[Dict],
+    threshold: float = 0.15,
+    min_relevance: float = 0.1
+) -> List[Dict]:
+    """
+    Remove context items that are unlikely to contribute to a useful summary.
+    """
+    if not items:
+        return items
+
+    kept = []
+    for item in items:
+        if item.get("normalized_score", 0) >= threshold:
+            kept.append(item)
+            continue
+
+        if item.get("relevance_score", 0) >= min_relevance:
+            kept.append(item)
+            continue
+
+    return kept if kept else items[:1]
+
+
 def apply_summarization_layer(
     ranked_items: List[Dict],
     query: str,
@@ -406,6 +464,8 @@ def apply_summarization_layer(
     Apply summarization layer to reduce context size while preserving essential information
     
     Techniques:
+    - Forget irrelevant context items
+    - Remove irrelevant sentences from long content
     - Summarize long interactions
     - Apply sliding window filtering
     - Extract key elements based on query
@@ -414,6 +474,12 @@ def apply_summarization_layer(
     max_content_length = summarization_config.get("max_content_length", 1000)
     window_size = summarization_config.get("sliding_window_size", 10)
     score_threshold = summarization_config.get("score_threshold", 0.3)
+
+    forget_config = summarization_config.get("forget_irrelevant", {})
+    forget_enabled = forget_config.get("enabled", True)
+    forget_threshold = forget_config.get("context_threshold", 0.15)
+    forget_min_relevance = forget_config.get("min_relevance", 0.1)
+    sentence_match_ratio = forget_config.get("sentence_match_ratio", 0.15)
     
     summarized_items = []
     
@@ -421,6 +487,14 @@ def apply_summarization_layer(
         summarized_item = item.copy()
         content = item.get("content", "")
         
+        # Remove irrelevant sentences first to reduce noise
+        if forget_enabled and len(content) > max_content_length:
+            content = forget_irrelevant_sentences(
+                content,
+                query,
+                min_match_ratio=sentence_match_ratio
+            )
+
         # Apply summarization techniques
         if len(content) > max_content_length:
             # Extract key elements first
@@ -436,6 +510,13 @@ def apply_summarization_layer(
         
         summarized_items.append(summarized_item)
     
+    if forget_enabled:
+        summarized_items = forget_irrelevant_context_items(
+            summarized_items,
+            threshold=forget_threshold,
+            min_relevance=forget_min_relevance
+        )
+
     # Apply sliding window to final results
     final_items = sliding_window_filter(
         summarized_items,
@@ -1314,11 +1395,8 @@ async def retrieve_context(
         )
         
         # STEP 6: Apply summarization layer
-        summarization_config = {
-            "max_content_length": 1000,
-            "sliding_window_size": request.max_results,
-            "score_threshold": 0.3
-        }
+        summarization_config = CONTEXT_RETRIEVAL_CONFIG.get("summarization", {}).copy()
+        summarization_config["sliding_window_size"] = request.max_results
         summarized = apply_summarization_layer(ranked, request.query, {"summarization": summarization_config})
         
         # Format output

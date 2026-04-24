@@ -16,7 +16,14 @@ Implémenter une couche de résumé pour réduire la taille du contexte tout en 
 - **Méthode** : Tri par score composite puis limitation à N éléments
 - **Paramètres** : Taille de fenêtre et seuil de score
 
-### 3. Extraction des éléments clés (`extract_key_elements`)
+### 3. Oubli des informations non pertinentes (`forget_irrelevant`)
+- **Objectif** : Retirer les contenus et phrases peu liés à la requête avant le résumé
+- **Méthode** :
+  - suppression des phrases contenant peu ou pas de termes de la requête
+  - élimination des éléments de contexte à faible score composite et faible pertinence
+- **Avantage** : Réduit le bruit et améliore la qualité du résumé
+
+### 4. Extraction des éléments clés (`extract_key_elements`)
 - **Objectif** : Identifier et extraire les phrases les plus pertinentes par rapport à la requête
 - **Méthode** : Scoring des phrases basé sur les termes de la requête
 - **Limite** : Maximum 3 phrases clés par contenu
@@ -84,7 +91,13 @@ CONTEXT_RETRIEVAL_CONFIG = {
         "sliding_window_size": 10,         # Nombre max d'éléments
         "score_threshold": 0.3,            # Seuil de score minimum
         "summarize_interactions": True,    # Activer résumé interactions
-        "extract_key_elements": True       # Activer extraction clés
+        "extract_key_elements": True,      # Activer extraction clés
+        "forget_irrelevant": {
+            "enabled": True,
+            "context_threshold": 0.15,
+            "min_relevance": 0.1,
+            "sentence_match_ratio": 0.15
+        }
     }
 }
 ```
