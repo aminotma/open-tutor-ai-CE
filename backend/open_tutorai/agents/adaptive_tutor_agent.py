@@ -19,12 +19,12 @@ from open_tutorai.routers.context_retrieval import (
     retrieve_pedagogical_documents,
 )
 
-# LangChain imports
-from langchain.tools import Tool
-from langchain_community.tools import DuckDuckGoSearchRun
-from langchain.agents import initialize_agent, AgentType
-from langchain.prompts import ChatPromptTemplate
-from langchain.chat_models import ChatOpenAI
+# # LangChain imports
+# from langchain.tools import Tool
+# from langchain_community.tools import DuckDuckGoSearchRun
+# from langchain.agents import initialize_agent, AgentType
+# from langchain.prompts import ChatPromptTemplate
+# from langchain.chat_models import ChatOpenAI
 
 negative_feedback_keywords = [
     "confused",
@@ -60,7 +60,7 @@ def _parse_feedback_difficulties(feedback_comments: List[str]) -> List[str]:
     difficulties = []
     for comment in feedback_comments:
         text = comment.lower()
-        if any(keyword in text for keyword in NEGATIVE_FEEDBACK_KEYWORDS):
+        if any(keyword in text for keyword in negative_feedback_keywords):
             cleaned = text.replace("\n", " ").strip()
             if len(cleaned) > 0:
                 difficulties.append(cleaned)
@@ -88,7 +88,8 @@ def _assess_current_level(
                 scored_items += 1
                 if score < 0.6:
                     difficulty_flags += 1
-            if item.get("outcome") and item.get("outcome").lower() in ["incorrect", "wrong", "failed"]:
+            outcome = item.get("outcome")
+            if outcome and isinstance(outcome, str) and outcome.lower() in ["incorrect", "wrong", "failed"]:
                 difficulty_flags += 1
 
     if feedback_comments:
@@ -154,13 +155,14 @@ def _detect_difficulties(
             if item.get("score") is not None and float(item.get("score", 0.0)) < 0.6:
                 label = item.get("outcome") or "low performance"
                 difficulties.append(f"Difficulté avec l'interaction : {label}")
-            if item.get("content") and topic.lower() in item.get("content", "").lower():
+            content = item.get("content", "")
+            if content and isinstance(content, str) and topic.lower() in content.lower():
                 if item.get("score") is not None and float(item.get("score", 0.0)) < 0.6:
                     difficulties.append(f"Compréhension de {topic} insuffisante")
 
     if learning_objectives:
         for objective in learning_objectives:
-            if any(keyword in objective.lower() for keyword in ["understand", "comprehend", "maîtriser"]):
+            if objective and isinstance(objective, str) and any(keyword in objective.lower() for keyword in ["understand", "comprehend", "maîtriser"]):
                 difficulties.append(f"Objectif à clarifier: {objective}")
 
     unique_difficulties = []
@@ -460,24 +462,24 @@ class BaseAgent:
         raise NotImplementedError
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LangChainOrchestrator: Utilise LangChain pour l'orchestration agentique
-# ─────────────────────────────────────────────────────────────────────────────
-
-class LangChainOrchestrator:
-    def __init__(self, state: AdaptiveTutorState, tools: List[Tool]):
-        self.state = state
-        self.llm = ChatOpenAI(temperature=0)  # Adapter selon la config OpenAI
-        self.tools = tools
-        self.agent = initialize_agent(self.tools, self.llm, agent=AgentType.OPENAI_FUNCTIONS, verbose=True)
-
-    async def run_orchestration(self, task: str) -> str:
-        try:
-            result = await self.agent.arun(task)
-            return result
-        except Exception as exc:
-            self.state.agent_trace.append(f"LangChainOrchestrator: erreur - {exc}")
-            return f"Erreur dans l'orchestration : {exc}"
+# # ─────────────────────────────────────────────────────────────────────────────
+# # LangChainOrchestrator: Utilise LangChain pour l'orchestration agentique
+# # ─────────────────────────────────────────────────────────────────────────────
+#
+# class LangChainOrchestrator:
+#     def __init__(self, state: AdaptiveTutorState, tools: List[Tool]):
+#         self.state = state
+#         self.llm = ChatOpenAI(temperature=0)  # Adapter selon la config OpenAI
+#         self.tools = tools
+#         self.agent = initialize_agent(self.tools, self.llm, agent=AgentType.OPENAI_FUNCTIONS, verbose=True)
+#
+#     async def run_orchestration(self, task: str) -> str:
+#         try:
+#             result = await self.agent.arun(task)
+#             return result
+#         except Exception as exc:
+#             self.state.agent_trace.append(f"LangChainOrchestrator: erreur - {exc}")
+#             return f"Erreur dans l'orchestration : {exc}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -497,29 +499,68 @@ class ToolAgent(BaseAgent):
     # DuckDuckGo Instant Answer endpoint – no auth required, CORS-friendly.
     _DDG_API = "https://api.duckduckgo.com/"
 
-    def __init__(self, state: AdaptiveTutorState):
-        super().__init__(state)
-        self.search_tool = DuckDuckGoSearchRun()
+    # def __init__(self, state: AdaptiveTutorState):
+    #     super().__init__(state)
+    #     # self.search_tool = DuckDuckGoSearchRun()  # Commenté temporairement
 
     # ── Public tool interface ─────────────────────────────────────────────
 
     def web_search(self, query: str, max_results: int = 5) -> str:
         """
-        Executes a web search using LangChain's DuckDuckGoSearchRun tool.
-
-        Returns a human-readable summary for use in prompts or context enrichment.
+        Executes a web search using DuckDuckGo Instant Answer API.
         """
-        self.state.agent_trace.append(f"ToolAgent (LangChain): recherche web pour '{query}'.")
+        self.state.agent_trace.append(f"ToolAgent: recherche web pour '{query}'.")
         try:
-            result = self.search_tool.run(query)
-            self.state.tool_results["web_search"] = {"query": query, "summary": result}
-            self.state.agent_trace.append("ToolAgent: recherche LangChain terminée.")
-            return result
+            params = {
+                "q": query,
+                "format": "json",
+                "no_html": 1,
+                "skip_disambig": 1,
+            }
+            response = requests.get(self._DDG_API, params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                # Extract relevant text from the response
+                abstract = data.get("AbstractText", "")
+                related_topics = data.get("RelatedTopics", [])
+                
+                result = abstract
+                if not result and related_topics:
+                    # Get first related topic text
+                    for topic in related_topics[:max_results]:
+                        if isinstance(topic, dict):
+                            result += topic.get("Text", "") + " "
+                
+                result = result.strip()
+                if not result:
+                    result = f"Résultat pour '{query}': aucune information trouvée."
+                
+                self.state.tool_results["web_search"] = {"query": query, "summary": result}
+                self.state.agent_trace.append("ToolAgent: recherche web terminée.")
+                return result
+            else:
+                raise Exception(f"HTTP {response.status_code}")
         except Exception as exc:
             error_msg = f"Recherche web échouée : {exc}"
             self.state.agent_trace.append(f"ToolAgent: {error_msg}")
             self.state.tool_results["web_search_error"] = str(exc)
             return error_msg
+
+    # def web_search(self, query: str, max_results: int = 5) -> str:
+    #     """
+    #     Executes a web search using LangChain's DuckDuckGoSearchRun tool.
+    #     """
+    #     self.state.agent_trace.append(f"ToolAgent (LangChain): recherche web pour '{query}'.")
+    #     try:
+    #         result = self.search_tool.run(query)
+    #         self.state.tool_results["web_search"] = {"query": query, "summary": result}
+    #         self.state.agent_trace.append("ToolAgent: recherche LangChain terminée.")
+    #         return result
+    #     except Exception as exc:
+    #         error_msg = f"Recherche web échouée : {exc}"
+    #         self.state.agent_trace.append(f"ToolAgent: {error_msg}")
+    #         self.state.tool_results["web_search_error"] = str(exc)
+    #         return error_msg
 
     def call_api(
         self,
@@ -979,7 +1020,7 @@ class AdaptiveTutorAgent:
             preferred_exercise_types=request_data.get("preferred_exercise_types", []) or [],
         )
         self.db = db
-        self.use_langchain = use_langchain
+        # self.use_langchain = use_langchain  # Commenté temporairement
 
         # Instantiate all agents.
         self.tool_agent = ToolAgent(self.state)
@@ -1012,17 +1053,17 @@ class AdaptiveTutorAgent:
             "collaboration": self.collaboration_agent,
         }
 
-        # LangChain orchestrator if enabled
-        if self.use_langchain:
-            tools = [
-                Tool.from_function(
-                    func=self.tool_agent.web_search,
-                    name="web_search",
-                    description="Recherche d'informations pédagogiques sur le web"
-                ),
-                # Ajouter d'autres outils si nécessaire
-            ]
-            self.orchestrator = LangChainOrchestrator(self.state, tools)
+        # # LangChain orchestrator if enabled
+        # if self.use_langchain:
+        #     tools = [
+        #         Tool.from_function(
+        #             func=self.tool_agent.web_search,
+        #             name="web_search",
+        #             description="Recherche d'informations pédagogiques sur le web"
+        #         ),
+        #         # Ajouter d'autres outils si nécessaire
+        #     ]
+        #     self.orchestrator = LangChainOrchestrator(self.state, tools)
 
     # ── Virtual node handler ──────────────────────────────────────────────
 
@@ -1066,49 +1107,49 @@ class AdaptiveTutorAgent:
         """
         Runs the agentic loop, using LangChain if enabled, otherwise the custom dynamic routing.
         """
-        if self.use_langchain:
-            self.state.agent_trace.append("AdaptiveTutorAgent: utilisation de LangChain pour l'orchestration.")
-            task = f"Orchestrer le tutorat adaptatif pour le sujet '{self.state.topic}' au niveau '{self.state.current_level}'. Analyser les difficultés, planifier les exercices, et enrichir avec des recherches web si nécessaire."
-            result = await self.orchestrator.run_orchestration(task)
-            # Pour l'instant, intégrer le résultat dans la trace ; à étendre pour parser et mettre à jour l'état
-            self.state.agent_trace.append(f"LangChain result: {result}")
-            # TODO: Parser le résultat pour mettre à jour exercises, strategy, etc.
-            self.state.consensus_reached = True  # Simuler consensus
-        else:
-            # Boucle de routage personnalisée existante
+        # if self.use_langchain:
+        #     self.state.agent_trace.append("AdaptiveTutorAgent: utilisation de LangChain pour l'orchestration.")
+        #     task = f"Orchestrer le tutorat adaptatif pour le sujet '{self.state.topic}' au niveau '{self.state.current_level}'. Analyser les difficultés, planifier les exercices, et enrichir avec des recherches web si nécessaire."
+        #     result = await self.orchestrator.run_orchestration(task)
+        #     # Pour l'instant, intégrer le résultat dans la trace ; à étendre pour parser et mettre à jour l'état
+        #     self.state.agent_trace.append(f"LangChain result: {result}")
+        #     # TODO: Parser le résultat pour mettre à jour exercises, strategy, etc.
+        #     self.state.consensus_reached = True  # Simuler consensus
+        # else:
+        # Boucle de routage personnalisée existante
+        self.state.agent_trace.append(
+            "AdaptiveTutorAgent: démarrage de la boucle agentique dynamique."
+        )
+        self.state.next_agent = "perception"
+
+        while (
+            self.state.next_agent is not None
+            and self.state.routing_iterations < MAX_ROUTING_ITERATIONS
+        ):
+            current = self.state.next_agent
+            self.state.routing_iterations += 1
             self.state.agent_trace.append(
-                "AdaptiveTutorAgent: démarrage de la boucle agentique dynamique."
+                f"Router [iter {self.state.routing_iterations}]: dispatch → '{current}'."
             )
-            self.state.next_agent = "perception"
 
-            while (
-                self.state.next_agent is not None
-                and self.state.routing_iterations < MAX_ROUTING_ITERATIONS
-            ):
-                current = self.state.next_agent
-                self.state.routing_iterations += 1
+            if current == "web_enrichment":
+                await self._handle_web_enrichment()
+                continue
+
+            agent = self._registry.get(current)
+            if agent is None:
                 self.state.agent_trace.append(
-                    f"Router [iter {self.state.routing_iterations}]: dispatch → '{current}'."
+                    f"Router: agent inconnu '{current}', arrêt de la boucle."
                 )
+                break
 
-                if current == "web_enrichment":
-                    await self._handle_web_enrichment()
-                    continue
+            await agent.act()
 
-                agent = self._registry.get(current)
-                if agent is None:
-                    self.state.agent_trace.append(
-                        f"Router: agent inconnu '{current}', arrêt de la boucle."
-                    )
-                    break
-
-                await agent.act()
-
-            if self.state.routing_iterations >= MAX_ROUTING_ITERATIONS:
-                self.state.agent_trace.append(
-                    f"AdaptiveTutorAgent: limite d'itérations ({MAX_ROUTING_ITERATIONS}) atteinte, "
-                    "arrêt de sécurité."
-                )
+        if self.state.routing_iterations >= MAX_ROUTING_ITERATIONS:
+            self.state.agent_trace.append(
+                f"AdaptiveTutorAgent: limite d'itérations ({MAX_ROUTING_ITERATIONS}) atteinte, "
+                "arrêt de sécurité."
+            )
 
         self.state.agent_trace.append(
             f"AdaptiveTutorAgent: boucle terminée "
