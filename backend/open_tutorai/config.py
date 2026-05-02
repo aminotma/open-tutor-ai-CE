@@ -83,5 +83,17 @@ CONTEXT_RETRIEVAL_CONFIG = {
         "diversity_strategy": True,
         "include_source_preview": True,
         "preview_length": 300
+    },
+    
+    # LangChain Configuration (pour la partie LLM et embeddings)
+    "langchain": {
+        "enabled": True,
+        "llm_model": "gpt-4o-mini",          # Modèle OpenAI utilisé
+        "llm_temperature": 0.2,               # Faible pour des réponses stables
+        "embedding_model": "all-MiniLM-L6-v2",# Même qu'avant, géré par LangChain
+        "retriever_search_type": "similarity", # Type de recherche ChromaDB
+        "fallback_to_web_search": True,        # DuckDuckGo si RAG vide
+        "max_rag_chars_in_prompt": 1000,       # Limite contexte RAG dans le prompt
+        "max_memory_items_in_prompt": 5,       # Limite mémoires dans le prompt
     }
 }

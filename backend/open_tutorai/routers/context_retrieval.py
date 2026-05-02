@@ -33,6 +33,9 @@ from open_webui.utils.auth import get_verified_user
 from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG
 from open_tutorai.models.database import Memory
 
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+
 router = APIRouter(tags=["context"])
 
 # ============================================================================
@@ -40,20 +43,61 @@ router = APIRouter(tags=["context"])
 # ============================================================================
 
 # Initialize ChromaDB client
-chroma_client = chromadb.PersistentClient(
-    path="data/vector_db",
-    settings=Settings(anonymized_telemetry=False)
-)
+# Imports LangChain
+
+# Client ChromaDB — initialisé en différé pour éviter les crashs à l'import
+_chroma_client = None
 
 # Collection for pedagogical documents
 DOCUMENTS_COLLECTION = "pedagogical_documents"
 
+
+def _get_chroma_client():
+    """Retourne (et crée si besoin) le client ChromaDB partagé."""
+    global _chroma_client
+    if _chroma_client is None:
+        # Chemin absolu : stable peu importe le répertoire de travail du processus
+        db_path = Path(__file__).resolve().parents[2] / "data" / "vector_db"
+        db_path.mkdir(parents=True, exist_ok=True)
+        _chroma_client = chromadb.PersistentClient(
+            path=str(db_path),
+            settings=Settings(anonymized_telemetry=False),
+        )
+    return _chroma_client
+
+
 def get_or_create_collection(collection_name: str):
-    """Get or create a ChromaDB collection"""
+    """Récupère ou crée une collection ChromaDB."""
+    client = _get_chroma_client()
     try:
-        return chroma_client.get_collection(name=collection_name)
+        return client.get_collection(name=collection_name)
     except Exception:
-        return chroma_client.create_collection(name=collection_name)
+        return client.create_collection(name=collection_name)
+
+# Fonction d'embeddings partagée entre indexation ET recherche
+# Utilise le même modèle qu'avant (all-MiniLM-L6-v2) mais géré par LangChain
+_embedding_function = None
+
+def get_embedding_function() -> HuggingFaceEmbeddings:
+    """Singleton pour éviter de recharger le modèle à chaque appel."""
+    global _embedding_function
+    if _embedding_function is None:
+        _embedding_function = HuggingFaceEmbeddings(
+            model_name="all-MiniLM-L6-v2",
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True}
+        )
+    return _embedding_function
+
+# Vectorstore LangChain — pointe sur le MÊME répertoire que l'ancien client
+def get_vectorstore() -> Chroma:
+    """Retourne le vectorstore LangChain."""
+    return Chroma(
+        collection_name=DOCUMENTS_COLLECTION,
+        embedding_function=get_embedding_function(),
+        persist_directory="data/vector_db"
+    )
+
 
 # ============================================================================
 # DOCUMENT INDEXING FUNCTIONS
@@ -66,142 +110,120 @@ def index_document_to_chromadb(
     collection_name: str = DOCUMENTS_COLLECTION
 ) -> bool:
     """
-    Index a document into ChromaDB for vector search
-    
-    Args:
-        doc_id: Unique identifier for the document
-        content: Full text content of the document
-        metadata: Metadata dictionary (title, path, user_id, etc.)
-        collection_name: ChromaDB collection name
-    
-    Returns:
-        bool: True if successfully indexed
+    Indexe via LangChain pour garantir la cohérence des embeddings
+    entre l'indexation et la recherche.
     """
     try:
-        collection = get_or_create_collection(collection_name)
-        
-        # Prepare metadata for ChromaDB (must be strings)
-        chroma_metadata = {}
+        from langchain_core.documents import Document as LangChainDocument
+
+        # Nettoyage des métadonnées (LangChain accepte str/int/float/bool)
+        clean_metadata = {}
         for key, value in metadata.items():
-            if isinstance(value, (str, int, float)):
-                chroma_metadata[key] = str(value)
+            if isinstance(value, (str, int, float, bool)):
+                clean_metadata[key] = value
             else:
-                chroma_metadata[key] = json.dumps(value)
-        
-        # Add document to collection
-        collection.add(
-            documents=[content],
-            metadatas=[chroma_metadata],
+                clean_metadata[key] = json.dumps(value)
+
+        doc = LangChainDocument(
+            page_content=content,
+            metadata=clean_metadata
+        )
+
+        vectorstore = get_vectorstore()
+
+        # Vérifie si déjà indexé via le client bas niveau
+        try:
+            existing = chroma_client.get_collection(
+                DOCUMENTS_COLLECTION
+            ).get(ids=[doc_id])
+            if existing and existing.get("ids"):
+                return True  # Déjà indexé, on ne réindexe pas
+        except Exception:
+            pass  # Collection vide ou doc absent, on continue
+
+        vectorstore.add_documents(
+            documents=[doc],
             ids=[doc_id]
         )
-        
         return True
+
     except Exception as e:
         print(f"Error indexing document {doc_id}: {str(e)}")
         return False
 
-def index_local_documents_to_chromadb(
-    base_paths: List[str] = None,
-    collection_name: str = DOCUMENTS_COLLECTION
-) -> int:
-    """
-    Index all local documents from specified paths into ChromaDB
-    
-    Args:
-        base_paths: List of directory paths to index (default: ["docs", "backend"])
-        collection_name: ChromaDB collection name
-    
-    Returns:
-        int: Number of documents indexed
-    """
-    if base_paths is None:
-        base_paths = ["docs", "backend"]
-    
-    collection = get_or_create_collection(collection_name)
-    indexed_count = 0
-    repo_root = Path(__file__).resolve().parents[4]
-    
-    for base_path_str in base_paths:
-        base_path = repo_root / base_path_str
-        if not base_path.exists():
-            continue
-            
-        for root, _, files in os.walk(base_path):
-            for file_name in files:
-                if not file_name.lower().endswith(('.md', '.txt', '.json')):
-                    continue
-                    
-                file_path = Path(root) / file_name
-                text = _read_text_file(file_path)
-                
-                if not text or len(text.strip()) < 50:  # Skip empty/short files
-                    continue
-                
-                doc_id = str(file_path.relative_to(repo_root))
-                
-                # Check if already indexed
-                try:
-                    existing = collection.get(ids=[doc_id])
-                    if existing['ids']:
-                        continue  # Already indexed
-                except Exception:
-                    pass  # Not indexed yet
-                
-                metadata = {
-                    "title": file_name,
-                    "path": str(file_path.relative_to(repo_root)),
-                    "source": "local_document",
-                    "file_type": file_path.suffix,
-                    "indexed_at": datetime.now(timezone.utc).isoformat()
-                }
-                
-                if index_document_to_chromadb(doc_id, text, metadata, collection_name):
-                    indexed_count += 1
-    
-    return indexed_count
 
-def index_uploaded_document_to_chromadb(
-    file_path: str,
-    user_id: str,
-    title: str = None,
-    collection_name: str = DOCUMENTS_COLLECTION
-) -> bool:
+def index_uploaded_document_to_chromadb(file_path: str, user_id: str, title: str) -> bool:
     """
-    Index an uploaded document into ChromaDB
+    Indexe un document uploadé par l'utilisateur dans ChromaDB.
     
     Args:
-        file_path: Path to the uploaded file
-        user_id: User ID who uploaded the document
-        title: Document title (optional, defaults to filename)
-        collection_name: ChromaDB collection name
+        file_path: Chemin absolu vers le fichier à indexer
+        user_id: ID de l'utilisateur qui a uploadé le fichier
+        title: Titre du document pour les métadonnées
     
     Returns:
-        bool: True if successfully indexed
+        True si l'indexation a réussi, False sinon
     """
     try:
-        path_obj = Path(file_path)
-        if not path_obj.exists():
+        from langchain_core.documents import Document as LangChainDocument
+        from pathlib import Path
+        
+        # Vérifier que le fichier existe
+        path = Path(file_path)
+        if not path.exists():
+            print(f"File not found: {file_path}")
             return False
-            
-        text = _read_text_file(path_obj)
-        if not text:
-            return False
         
-        doc_id = f"upload_{user_id}_{path_obj.name}_{uuid4().hex[:8]}"
+        # Lire le contenu du fichier
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except Exception as e:
+            print(f"Error reading file {file_path}: {str(e)}")
+            # Essayer en mode binaire pour les fichiers non-texte
+            try:
+                with open(file_path, 'rb') as f:
+                    content = f.read().decode('utf-8', errors='ignore')
+            except Exception as e2:
+                print(f"Error decoding file {file_path}: {str(e2)}")
+                return False
         
-        if not title:
-            title = path_obj.stem
+        # Générer un ID unique pour le document
+        doc_id = f"upload_{uuid4()}"
         
+        # Préparer les métadonnées
         metadata = {
-            "title": title,
-            "path": str(path_obj),
-            "source": "uploaded_document",
+            "type": "uploaded_document",
+            "source": "user_upload",
             "user_id": user_id,
-            "file_type": path_obj.suffix,
-            "uploaded_at": datetime.now(timezone.utc).isoformat()
+            "title": title,
+            "file_path": file_path,
+            "indexed_at": datetime.now(timezone.utc).timestamp()
         }
         
-        return index_document_to_chromadb(doc_id, text, metadata, collection_name)
+        # Nettoyage des métadonnées pour LangChain
+        clean_metadata = {}
+        for key, value in metadata.items():
+            if isinstance(value, (str, int, float, bool)):
+                clean_metadata[key] = value
+            else:
+                clean_metadata[key] = json.dumps(value)
+        
+        # Créer le document LangChain
+        doc = LangChainDocument(
+            page_content=content,
+            metadata=clean_metadata
+        )
+        
+        # Ajouter au vectorstore
+        vectorstore = get_vectorstore()
+        vectorstore.add_documents(
+            documents=[doc],
+            ids=[doc_id]
+        )
+        
+        print(f"Successfully indexed document: {title} (ID: {doc_id})")
+        return True
         
     except Exception as e:
         print(f"Error indexing uploaded document {file_path}: {str(e)}")
@@ -565,87 +587,66 @@ def _score_document_relevance(content: str, query: str) -> float:
     similarity_score = _calculate_text_similarity(query, content)
     return float(max(exact_score, similarity_score))
 
-
 async def retrieve_pedagogical_documents(
     user_id: str,
     query: str,
     top_k: int = 5
 ) -> List[Dict]:
     """
-    Retrieve pedagogical documents using ChromaDB vector search
-    
-    This implementation uses vector similarity search over indexed documents
-    in ChromaDB. Documents are automatically indexed from local directories
-    and uploaded files.
-    
-    Args:
-        user_id: User ID for filtering (future use)
-        query: Search query
-        top_k: Number of top results to return
-    
-    Returns:
-        List of document dictionaries with metadata and scores
+    Récupère les documents via LangChain similarity_search_with_score.
+    Retourne le même format de dictionnaire que l'ancienne version
+    pour ne pas casser les consommateurs existants.
     """
     try:
         if not query or not query.strip():
             return []
-        
-        # Ensure local documents are indexed (lazy indexing)
+
+        # Indexation lazy des documents locaux (inchangée)
         indexed_count = index_local_documents_to_chromadb()
         if indexed_count > 0:
             print(f"Indexed {indexed_count} new local documents")
-        
-        # Get collection and perform vector search
-        collection = get_or_create_collection(DOCUMENTS_COLLECTION)
-        
-        # Query the collection
-        results = collection.query(
-            query_texts=[query],
-            n_results=top_k,
-            include=['documents', 'metadatas', 'distances']
+
+        vectorstore = get_vectorstore()
+
+        # Recherche sémantique via LangChain
+        # Retourne List[Tuple[LangChainDocument, float]]
+        results_with_scores = vectorstore.similarity_search_with_score(
+            query=query,
+            k=top_k
         )
-        
+
         documents = []
-        if results['ids'] and results['ids'][0]:
-            for i, doc_id in enumerate(results['ids'][0]):
-                distance = results['distances'][0][i] if results['distances'] else 0.5
-                metadata = results['metadatas'][0][i] if results['metadatas'] else {}
-                content = results['documents'][0][i] if results['documents'] else ""
-                
-                # Convert distance to similarity score (ChromaDB returns cosine distance)
-                # Lower distance = higher similarity
-                vector_score = max(0.0, 1.0 - distance)
-                
-                # Parse metadata back from strings
-                parsed_metadata = {}
-                for key, value in metadata.items():
-                    try:
-                        parsed_metadata[key] = json.loads(value)
-                    except (json.JSONDecodeError, TypeError):
-                        parsed_metadata[key] = value
-                
-                documents.append({
-                    "id": doc_id,
-                    "source_type": "rag",
-                    "content": content,
-                    "metadata": {
-                        "title": parsed_metadata.get("title", doc_id),
-                        "path": parsed_metadata.get("path", ""),
-                        "source": parsed_metadata.get("source", "unknown"),
-                        "file_type": parsed_metadata.get("file_type", ""),
-                        "user_id": parsed_metadata.get("user_id", ""),
-                        "indexed_at": parsed_metadata.get("indexed_at", ""),
-                        "uploaded_at": parsed_metadata.get("uploaded_at", "")
-                    },
-                    "relevance_score": vector_score,
-                    "vector_score": vector_score
-                })
-        
+        for lc_doc, distance in results_with_scores:
+            # ChromaDB retourne une distance cosinus (0=identique, 2=opposé)
+            # On convertit en score de similarité [0, 1]
+            vector_score = max(0.0, 1.0 - (distance / 2.0))
+
+            metadata = lc_doc.metadata or {}
+
+            # Extraction de l'id (stocké dans les métadonnées ou généré)
+            doc_id = metadata.get("doc_id", metadata.get("path", f"doc_{hash(lc_doc.page_content)}"))
+
+            documents.append({
+                "id": doc_id,
+                "source_type": "rag",
+                "content": lc_doc.page_content,
+                "metadata": {
+                    "title": metadata.get("title", doc_id),
+                    "path": metadata.get("path", ""),
+                    "source": metadata.get("source", "unknown"),
+                    "file_type": metadata.get("file_type", ""),
+                    "user_id": metadata.get("user_id", ""),
+                    "indexed_at": metadata.get("indexed_at", ""),
+                    "uploaded_at": metadata.get("uploaded_at", "")
+                },
+                "relevance_score": vector_score,
+                "vector_score": vector_score
+            })
+
         return documents
-        
+
     except Exception as e:
-        print(f"Error retrieving pedagogical documents: {str(e)}")
-        # Fallback to file-walk if ChromaDB fails
+        print(f"Error retrieving pedagogical documents (LangChain): {str(e)}")
         return await _retrieve_pedagogical_documents_fallback(user_id, query, top_k)
 
 async def _retrieve_pedagogical_documents_fallback(
@@ -702,6 +703,27 @@ async def _retrieve_pedagogical_documents_fallback(
         print(f"Error in fallback retrieval: {str(e)}")
         return []
 
+async def retrieve_pedagogical_documents_as_langchain(
+    user_id: str,
+    query: str,
+    top_k: int = 5
+) -> List["LangChainDocument"]:
+    """
+    Version qui retourne des objets LangChain Document natifs.
+    Utilisée directement par les RetrievalChain LangChain.
+    """
+    from langchain_core.documents import Document as LangChainDocument
+
+    try:
+        if not query or not query.strip():
+            return []
+
+        vectorstore = get_vectorstore()
+        return vectorstore.similarity_search(query=query, k=top_k)
+
+    except Exception as e:
+        print(f"Error in LangChain retrieval: {str(e)}")
+        return []
 
 async def retrieve_internal_memory(
     user_id: str,
@@ -1464,30 +1486,25 @@ async def index_local_documents_endpoint(
 async def reset_vector_database(
     user=Depends(get_verified_user)
 ):
-    """
-    Reset the ChromaDB vector database
-    
-    This removes all indexed documents and recreates the collection.
-    Use with caution as it will remove all vector indexes.
-    """
     try:
         # Delete the collection
         try:
-            chroma_client.delete_collection(name=DOCUMENTS_COLLECTION)
+            _get_chroma_client().delete_collection(name=DOCUMENTS_COLLECTION)
         except Exception:
             pass  # Collection might not exist
-        
+
         # Recreate the collection
-        collection = chroma_client.create_collection(name=DOCUMENTS_COLLECTION)
-        
+        collection = _get_chroma_client().create_collection(name=DOCUMENTS_COLLECTION)
+
         return {
             "status": "success",
             "message": f"Reset ChromaDB collection '{DOCUMENTS_COLLECTION}'"
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to reset vector database: {str(e)}")
-
+    
+    
 @router.get("/context/vector-db-stats")
 async def get_vector_db_stats(
     user=Depends(get_verified_user)

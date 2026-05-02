@@ -44,10 +44,9 @@ class AdaptiveTutorRequest(BaseModel):
         description="Preferred exercise types such as multiple-choice or worked examples"
     )
     use_langchain: Optional[bool] = Field(
-        False,
-        description="Whether to use LangChain for orchestration instead of custom agents"
+        True,   
+        description="Whether to use LangChain for orchestration (default: True)"
     )
-
 
 class ExerciseSuggestion(BaseModel):
     id: str
@@ -488,14 +487,15 @@ async def create_adaptive_plan(
     db=Depends(get_db)
 ):
     try:
+        # use_langchain=True par défaut désormais
         agent = AdaptiveTutorAgent(
             user_id=user.id,
             request_data=request.dict(),
             db=db,
-            use_langchain=request.use_langchain,
+            use_langchain=True,  # LangChain est maintenant l'orchestrateur par défaut
         )
         state = await agent.run()
-
+        
         return {
             "adjusted_level": state.adjusted_level,
             "detected_difficulties": state.difficulties,

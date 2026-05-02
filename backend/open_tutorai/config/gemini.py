@@ -151,8 +151,8 @@ class Pipeline:
         if not user_name and user_id:
             try:
                 user = Users.get_user_by_id(user_id)
-                if user and user.meta_data:
-                    meta_data = user.meta_data if isinstance(user.meta_data, dict) else {}
+                if user and user.info:
+                    meta_data = user.info if isinstance(user.info, dict) else {}
                     first_name = meta_data.get('first_name')
                     last_name = meta_data.get('last_name')
                     if first_name or last_name:

@@ -28,7 +28,7 @@ export const USAGE_POOL: Writable<null | string[]> = writable(null);
 export const theme = writable('system');
 
 export const shortCodesToEmojis = writable(
-	Object.entries(emojiShortCodes).reduce((acc, [key, value]) => {
+	Object.entries(emojiShortCodes).reduce((acc: Record<string, string>, [key, value]) => {
 		if (typeof value === 'string') {
 			acc[value] = key;
 		} else {
@@ -36,7 +36,6 @@ export const shortCodesToEmojis = writable(
 				acc[v] = key;
 			}
 		}
-
 		return acc;
 	}, {})
 );
@@ -130,31 +129,30 @@ type OllamaModelDetails = {
 };
 
 type Settings = {
-	models?: string[];
-	conversationMode?: boolean;
-	speechAutoSend?: boolean;
-	responseAutoPlayback?: boolean;
-	audio?: AudioSettings;
-	showUsername?: boolean;
-	notificationEnabled?: boolean;
-	title?: TitleSettings;
-	splitLargeDeltas?: boolean;
-	chatDirection: 'LTR' | 'RTL';
-	avatarEnabled?: boolean;
-	selectedAvatarId?: string;
-
-	system?: string;
-	requestFormat?: string;
-	keepAlive?: string;
-	seed?: number;
-	temperature?: string;
-	repeat_penalty?: string;
-	top_k?: string;
-	top_p?: string;
-	num_ctx?: string;
-	num_batch?: string;
-	num_keep?: string;
-	options?: ModelOptions;
+  models?: string[];
+  conversationMode?: boolean;
+  speechAutoSend?: boolean;
+  responseAutoPlayback?: boolean;
+  audio?: AudioSettings;
+  showUsername?: boolean;
+  notificationEnabled?: boolean;
+  title?: TitleSettings;
+  splitLargeDeltas?: boolean;
+  chatDirection?: 'LTR' | 'RTL';  // ← Ajouter "?" pour le rendre optionnel
+  avatarEnabled?: boolean;
+  selectedAvatarId?: string;
+  system?: string;
+  requestFormat?: string;
+  keepAlive?: string;
+  seed?: number;
+  temperature?: string;
+  repeat_penalty?: string;
+  top_k?: string;
+  top_p?: string;
+  num_ctx?: string;
+  num_batch?: string;
+  num_keep?: string;
+  options?: ModelOptions;
 };
 
 type ModelOptions = {

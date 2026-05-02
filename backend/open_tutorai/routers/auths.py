@@ -2,6 +2,7 @@ import time
 import datetime
 import logging
 
+from typing import Literal, cast
 from open_webui.models.auths import Auths, Token, UserResponse
 from open_webui.models.users import Users
 from open_webui.models.models import Models, ModelForm
@@ -96,28 +97,29 @@ async def signup(request: Request, response: Response, form_data: SignupForm):
             )
 
         log.info(f"Creating new user with role: {role}")
-
+       
         hashed = get_password_hash(form_data.password)
+        profile_image_url = form_data.profile_image_url or ""
         user = Auths.insert_new_auth(
             form_data.email.lower(),
             hashed,
             form_data.name,
-            form_data.profile_image_url,
+            profile_image_url,
             role,
         )
 
         if user:
             # Store first_name and last_name in user meta_data
             if form_data.first_name or form_data.last_name:
-                meta_data = user.meta_data or {}
+                meta_data = user.info or {}
                 if form_data.first_name:
                     meta_data['first_name'] = form_data.first_name
                 if form_data.last_name:
                     meta_data['last_name'] = form_data.last_name
-                Users.update_user_by_id(user.id, {'meta_data': meta_data})
+                Users.update_user_by_id(user.id, {'info': meta_data})
 
             # If this is not the first user (admin), update admin models to be public
-            if user_count > 0:
+            if user_count is not None and user_count > 0:
                 # Get all models
                 # Get all models
                 all_models = Models.get_all_models()
@@ -167,7 +169,7 @@ async def signup(request: Request, response: Response, form_data: SignupForm):
                 value=token,
                 expires=datetime_expires_at,
                 httponly=True,  # Ensures the cookie is not accessible via JavaScript
-                samesite=WEBUI_AUTH_COOKIE_SAME_SITE,
+                samesite=cast(Literal["lax", "strict", "none"], WEBUI_AUTH_COOKIE_SAME_SITE),
                 secure=WEBUI_AUTH_COOKIE_SECURE,
             )
 
@@ -201,7 +203,7 @@ async def signup(request: Request, response: Response, form_data: SignupForm):
         else:
             raise HTTPException(500, detail=ERROR_MESSAGES.CREATE_USER_ERROR)
     except Exception as err:
-        raise HTTPException(500, detail=ERROR_MESSAGES.DEFAULT(err))
+        raise HTTPException(500, detail=ERROR_MESSAGES.DEFAULT(str(err)))
 
 @router.get("/user-count")
 async def get_user_count():
@@ -210,4 +212,4 @@ async def get_user_count():
         user_count = Users.get_num_users()
         return {"count": user_count}
     except Exception as err:
-        raise HTTPException(500, detail=ERROR_MESSAGES.DEFAULT(err))
+        raise HTTPException(500, detail=ERROR_MESSAGES.DEFAULT(str(err)))

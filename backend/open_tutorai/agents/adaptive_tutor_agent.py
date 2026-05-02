@@ -20,11 +20,26 @@ from open_tutorai.routers.context_retrieval import (
 )
 
 # LangChain imports
-from langchain.tools import Tool
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
+from langchain_openai import ChatOpenAI
+from langchain.agents import AgentExecutor, create_openai_functions_agent
+from langchain.tools import Tool, StructuredTool
 from langchain_community.tools import DuckDuckGoSearchRun
-from langchain.agents import initialize_agent, AgentType
-from langchain.prompts import ChatPromptTemplate
-from langchain.chat_models import ChatOpenAI
+from langchain_core.documents import Document as LangChainDocument
+from langchain.chains import RetrievalQA
+from langchain_chroma import Chroma
+
+from open_tutorai.routers.context_retrieval import (
+    retrieve_internal_memory,
+    retrieve_pedagogical_documents,
+    retrieve_pedagogical_documents_as_langchain,
+    get_vectorstore,
+)
+from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG
+from open_tutorai.models.database import Memory
 
 negative_feedback_keywords = [
     "confused",
@@ -421,6 +436,10 @@ async def verify_agent_output(
 
 @dataclass
 class AdaptiveTutorState:
+    """
+    State partagé entre les noeuds LangChain.
+    Chaque champ est mis à jour par un noeud de la chain.
+    """
     user_id: str
     topic: str
     current_level: str
@@ -428,29 +447,26 @@ class AdaptiveTutorState:
     feedback_comments: List[str] = field(default_factory=list)
     learning_objectives: List[str] = field(default_factory=list)
     preferred_exercise_types: List[str] = field(default_factory=list)
+
+    # Contexte récupéré
     memory_context: List[Dict[str, Any]] = field(default_factory=list)
     pedagogical_context: List[Dict[str, Any]] = field(default_factory=list)
+
+    # Résultats produits par la chain
     adjusted_level: str = "intermediate"
     difficulties: List[str] = field(default_factory=list)
     strategy: List[str] = field(default_factory=list)
     strategy_decisions: List[Dict[str, Any]] = field(default_factory=list)
     suggested_exercises: List[Dict[str, Any]] = field(default_factory=list)
     priority_focus: List[str] = field(default_factory=list)
-    tasks: List[str] = field(default_factory=list)
-    agent_trace: List[str] = field(default_factory=list)
+
+    # Vérification RAG
     tool_results: Dict[str, Any] = field(default_factory=dict)
     reflection_notes: List[str] = field(default_factory=list)
 
-    # ── Dynamic routing state ────────────────────────────────────────────────
-    # The next agent the router should call.  None signals "done".
-    next_agent: Optional[str] = None
-    # How many routing iterations have already run (circuit-breaker guard).
-    routing_iterations: int = 0
-    # Whether the CollaborationAgent has validated a final consensus.
-    consensus_reached: bool = False
-    # Corrective iterations requested by CollaborationAgent.
-    corrective_cycles: int = 0
-
+    # Trace de l'exécution LangChain
+    agent_trace: List[str] = field(default_factory=list)
+    langchain_messages: List[Any] = field(default_factory=list)
 
 class BaseAgent:
     def __init__(self, state: AdaptiveTutorState):
@@ -952,23 +968,11 @@ class CollaborationAgent(BaseAgent):
 
 class AdaptiveTutorAgent:
     """
-    Orchestrates all specialist agents through a dynamic routing loop.
-
-    Instead of a hard-coded sequential call chain, each agent sets
-    ``state.next_agent`` to the name of the agent that should run next.
-    The router dispatches accordingly until ``next_agent`` is ``None``
-    (consensus reached) or ``MAX_ROUTING_ITERATIONS`` is exceeded.
-
-    Special virtual node "web_enrichment"
-    ──────────────────────────────────────
-    When the planning agent decides the context is too thin, it routes to
-    the virtual "web_enrichment" node.  The router calls
-    ``ToolAgent.web_search`` directly, injects the result into the
-    state, then routes to "exercise".  This keeps the real agents lean
-    while making web search a first-class routing destination.
+    Orchestration LangChain remplaçant le système d'agents custom.
+    Utilise une séquence de chains plutôt qu'un routeur dynamique manuel.
     """
 
-    def __init__(self, user_id: str, request_data: Dict[str, Any], db, use_langchain: bool = False):
+    def __init__(self, user_id: str, request_data: Dict[str, Any], db, use_langchain: bool = True):
         self.state = AdaptiveTutorState(
             user_id=user_id,
             topic=request_data.get("topic", ""),
@@ -979,141 +983,308 @@ class AdaptiveTutorAgent:
             preferred_exercise_types=request_data.get("preferred_exercise_types", []) or [],
         )
         self.db = db
-        self.use_langchain = use_langchain
 
-        # Instantiate all agents.
-        self.tool_agent = ToolAgent(self.state)
-        self.perception_agent = PerceptionAgent(self.state, db)
-        self.diagnosis_agent = DiagnosisAgent(self.state)
-        self.planning_agent = PlanningAgent(self.state)
-        self.exercise_agent = ExerciseAgent(self.state, self.tool_agent)
-        self.verification_agent = VerificationAgent(self.state)
-        self.reflection_agent = ReflectionAgent(self.state, db)
-        self.collaboration_agent = CollaborationAgent(
-            self.state,
-            [
-                self.perception_agent,
-                self.diagnosis_agent,
-                self.planning_agent,
-                self.exercise_agent,
-                self.verification_agent,
-                self.reflection_agent,
-            ],
+        # LLM principal
+        self.llm = ChatOpenAI(
+            model="gpt-4o-mini",
+            temperature=0.2
         )
 
-        # Name → agent lookup used by the router.
-        self._registry: Dict[str, BaseAgent] = {
-            "perception": self.perception_agent,
-            "diagnosis": self.diagnosis_agent,
-            "planning": self.planning_agent,
-            "exercise": self.exercise_agent,
-            "verification": self.verification_agent,
-            "reflection": self.reflection_agent,
-            "collaboration": self.collaboration_agent,
-        }
-
-        # LangChain orchestrator if enabled
-        if self.use_langchain:
-            tools = [
-                Tool.from_function(
-                    func=self.tool_agent.web_search,
-                    name="web_search",
-                    description="Recherche d'informations pédagogiques sur le web"
-                ),
-                # Ajouter d'autres outils si nécessaire
-            ]
-            self.orchestrator = LangChainOrchestrator(self.state, tools)
-
-    # ── Virtual node handler ──────────────────────────────────────────────
-
-    async def _handle_web_enrichment(self) -> None:
-        """
-        Performs a real web search to enrich the pedagogical context when
-        no local RAG documents are available, then routes to 'exercise'.
-        """
-        self.state.agent_trace.append(
-            "Router: nœud virtuel 'web_enrichment' — appel ToolAgent.web_search."
+        # Vectorstore LangChain (ChromaDB adapté)
+        self.vectorstore = get_vectorstore()
+        self.retriever = self.vectorstore.as_retriever(
+            search_type="similarity",
+            search_kwargs={"k": CONTEXT_RETRIEVAL_CONFIG["rag"]["top_k_documents"]}
         )
-        query = self.state.topic
-        if self.state.learning_objectives:
-            query += " " + " ".join(self.state.learning_objectives[:2])
 
-        search_result = self.tool_agent.web_search(query)
+        # Outil de recherche web (DuckDuckGo — déjà présent avant)
+        self.search_tool = DuckDuckGoSearchRun()
 
-        # Inject web result as a synthetic pedagogical document so
-        # downstream agents (VerificationAgent) can use it.
-        if search_result and "échouée" not in search_result:
-            synthetic_doc = {
-                "id": f"web_{uuid4().hex[:8]}",
-                "content": search_result,
-                "relevance_score": 0.5,
-                "metadata": {
-                    "title": f"Résultat web : {query}",
-                    "source": "web_search",
-                },
-            }
-            self.state.pedagogical_context.append(synthetic_doc)
-            self.state.agent_trace.append(
-                "Router: document web injecté dans le contexte pédagogique."
-            )
+        # Construction des outils LangChain
+        self.tools = self._build_tools()
 
-        # Continue to exercise generation.
-        self.state.next_agent = "exercise"
+    def _build_tools(self) -> List[Tool]:
+        """Construit les outils disponibles pour l'agent LangChain."""
 
-    # ── Main entry point ──────────────────────────────────────────────────
+        def web_search_fn(query: str) -> str:
+            self.state.agent_trace.append(f"Tool: web_search → '{query}'")
+            try:
+                result = self.search_tool.run(query)
+                return result
+            except Exception as e:
+                return f"Recherche échouée : {e}"
+
+        def retrieve_memory_fn(query: str) -> str:
+            """Récupère les mémoires internes synchroniquement pour LangChain."""
+            import asyncio
+            self.state.agent_trace.append(f"Tool: retrieve_memory → '{query}'")
+            try:
+                loop = asyncio.get_event_loop()
+                memories = loop.run_until_complete(
+                    retrieve_internal_memory(
+                        self.state.user_id,
+                        query,
+                        memory_types=CONTEXT_RETRIEVAL_CONFIG["memory"]["memory_types"],
+                        limit=CONTEXT_RETRIEVAL_CONFIG["memory"]["top_k_memories"],
+                        db=self.db
+                    )
+                )
+                self.state.memory_context = memories
+                return "\n".join([m.get("content", "") for m in memories[:5]])
+            except Exception as e:
+                return f"Mémoire non disponible : {e}"
+
+        def rag_retrieve_fn(query: str) -> str:
+            """Recherche dans ChromaDB via LangChain retriever."""
+            self.state.agent_trace.append(f"Tool: rag_retrieve → '{query}'")
+            try:
+                docs = self.retriever.invoke(query)
+                self.state.pedagogical_context = [
+                    {"content": d.page_content, "metadata": d.metadata}
+                    for d in docs
+                ]
+                return "\n\n".join([d.page_content[:500] for d in docs])
+            except Exception as e:
+                return f"RAG non disponible : {e}"
+
+        return [
+            Tool(
+                name="web_search",
+                func=web_search_fn,
+                description=(
+                    "Recherche des informations pédagogiques sur le web. "
+                    "Utilise quand le contexte RAG est insuffisant."
+                )
+            ),
+            Tool(
+                name="retrieve_memory",
+                func=retrieve_memory_fn,
+                description=(
+                    "Récupère les mémoires d'apprentissage passées de l'apprenant. "
+                    "Utilise pour personnaliser la stratégie."
+                )
+            ),
+            Tool(
+                name="rag_retrieve",
+                func=rag_retrieve_fn,
+                description=(
+                    "Recherche dans la base de documents pédagogiques vectoriels (ChromaDB). "
+                    "Utilise en priorité avant web_search."
+                )
+            ),
+        ]
+
+    def _build_diagnosis_chain(self):
+        """Chain de diagnostic du niveau et des difficultés."""
+        prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content=(
+                "Tu es un tuteur adaptatif expert. Analyse les performances "
+                "de l'apprenant et produis un diagnostic JSON strict."
+            )),
+            HumanMessage(content=(
+                "Sujet : {topic}\n"
+                "Niveau actuel : {current_level}\n"
+                "Interactions récentes : {interactions}\n"
+                "Commentaires : {feedback}\n"
+                "Mémoires passées : {memory}\n\n"
+                "Réponds UNIQUEMENT en JSON valide avec les clés : "
+                "adjusted_level (beginner/intermediate/advanced), "
+                "difficulties (liste de str), "
+                "priority_focus (liste de str, max 3)."
+            ))
+        ])
+        return prompt | self.llm | JsonOutputParser()
+
+    def _build_planning_chain(self):
+        """Chain de planification de la stratégie pédagogique."""
+        prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content=(
+                "Tu es un planificateur pédagogique. Génère une stratégie "
+                "d'apprentissage directive et concrète."
+            )),
+            HumanMessage(content=(
+                "Sujet : {topic}\n"
+                "Niveau ajusté : {adjusted_level}\n"
+                "Difficultés détectées : {difficulties}\n"
+                "Contexte pédagogique RAG : {rag_context}\n"
+                "Objectifs : {objectives}\n\n"
+                "Réponds UNIQUEMENT en JSON valide avec les clés : "
+                "strategy (liste de str), "
+                "strategy_decisions (liste de dict avec id/action/rationale/priority)."
+            ))
+        ])
+        return prompt | self.llm | JsonOutputParser()
+
+    def _build_exercise_chain(self):
+        """Chain de génération d'exercices adaptés."""
+        prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content=(
+                "Tu es un générateur d'exercices pédagogiques. "
+                "Crée des exercices ciblés et progressifs."
+            )),
+            HumanMessage(content=(
+                "Sujet : {topic}\n"
+                "Niveau : {adjusted_level}\n"
+                "Objectifs : {objectives}\n"
+                "Difficultés à corriger : {difficulties}\n"
+                "Contexte RAG disponible : {rag_context}\n\n"
+                "Génère 3 exercices. Réponds UNIQUEMENT en JSON valide : "
+                "liste de dict avec les clés "
+                "id, difficulty, question, hint, answer, skill_target."
+            ))
+        ])
+        return prompt | self.llm | JsonOutputParser()
+
+    async def _run_verification(
+        self,
+        exercises: List[Dict],
+        strategy: List[str]
+    ) -> Dict:
+        """Vérification RAG (réutilise la logique existante)."""
+        from open_tutorai.routers.adaptive_tutor import verify_adaptive_tutor_output
+        from open_tutorai.routers.adaptive_tutor import AdaptiveTutorRequest
+
+        class _FakeRequest:
+            topic = self.state.topic
+            learning_objectives = self.state.learning_objectives
+
+        result = await verify_adaptive_tutor_output(
+            self.state.user_id,
+            _FakeRequest(),
+            exercises,
+            strategy
+        )
+        return result.dict() if hasattr(result, "dict") else result
+
+    async def _persist_memory(self, exercises: List[Dict], verification: Dict):
+        """Persistance mémoire comportementale (logique conservée de ReflectionAgent)."""
+        if not self.db:
+            return
+        from uuid import uuid4
+        from datetime import datetime, timezone
+
+        verdict = verification.get("verdict", "unknown")
+        summary = (
+            f"LangChain session: niveau {self.state.adjusted_level}, "
+            f"difficultés {', '.join(self.state.difficulties[:3])}. "
+            f"Vérification : {verdict}."
+        )
+        memory = Memory(
+            id=uuid4().hex,
+            user_id=self.state.user_id,
+            memory_type="behavioral",
+            content=summary,
+            memory_metadata={
+                "topic": self.state.topic,
+                "agent_step": "langchain_reflection",
+                "verification": verdict,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        try:
+            self.db.add(memory)
+            self.db.commit()
+            self.db.refresh(memory)
+            self.state.agent_trace.append("LangChain: mémoire comportementale persistée.")
+        except Exception:
+            self.db.rollback()
+            self.state.agent_trace.append("LangChain: échec persistance mémoire.")
 
     async def run(self) -> AdaptiveTutorState:
         """
-        Runs the agentic loop, using LangChain if enabled, otherwise the custom dynamic routing.
+        Pipeline LangChain en 5 étapes séquentielles remplaçant
+        la boucle de routage dynamique custom.
         """
-        if self.use_langchain:
-            self.state.agent_trace.append("AdaptiveTutorAgent: utilisation de LangChain pour l'orchestration.")
-            task = f"Orchestrer le tutorat adaptatif pour le sujet '{self.state.topic}' au niveau '{self.state.current_level}'. Analyser les difficultés, planifier les exercices, et enrichir avec des recherches web si nécessaire."
-            result = await self.orchestrator.run_orchestration(task)
-            # Pour l'instant, intégrer le résultat dans la trace ; à étendre pour parser et mettre à jour l'état
-            self.state.agent_trace.append(f"LangChain result: {result}")
-            # TODO: Parser le résultat pour mettre à jour exercises, strategy, etc.
-            self.state.consensus_reached = True  # Simuler consensus
-        else:
-            # Boucle de routage personnalisée existante
-            self.state.agent_trace.append(
-                "AdaptiveTutorAgent: démarrage de la boucle agentique dynamique."
+        self.state.agent_trace.append("LangChain AdaptiveTutorAgent: démarrage.")
+
+        # ── Étape 1 : Récupération du contexte (mémoire + RAG) ──────────────
+        self.state.agent_trace.append("Étape 1: Récupération contexte.")
+
+        # Mémoire interne
+        self.state.memory_context = await retrieve_internal_memory(
+            self.state.user_id,
+            self.state.topic,
+            memory_types=CONTEXT_RETRIEVAL_CONFIG["memory"]["memory_types"],
+            limit=CONTEXT_RETRIEVAL_CONFIG["memory"]["top_k_memories"],
+            db=self.db
+        )
+
+        # Documents RAG via LangChain retriever
+        rag_docs = self.retriever.invoke(self.state.topic)
+        self.state.pedagogical_context = [
+            {"content": d.page_content, "metadata": d.metadata}
+            for d in rag_docs
+        ]
+        rag_context_str = "\n\n".join([d.page_content[:400] for d in rag_docs])
+
+        # Fallback web si RAG vide
+        if not rag_docs:
+            self.state.agent_trace.append("Étape 1: RAG vide → fallback web_search.")
+            rag_context_str = self.search_tool.run(self.state.topic)
+
+        memory_str = "\n".join([
+            m.get("content", "")[:200]
+            for m in self.state.memory_context[:5]
+        ])
+
+        # ── Étape 2 : Diagnostic ─────────────────────────────────────────────
+        self.state.agent_trace.append("Étape 2: Diagnostic niveau et difficultés.")
+        diagnosis_chain = self._build_diagnosis_chain()
+        diagnosis_result = await diagnosis_chain.ainvoke({
+            "topic": self.state.topic,
+            "current_level": self.state.current_level,
+            "interactions": str(self.state.recent_interactions[:3]),
+            "feedback": str(self.state.feedback_comments),
+            "memory": memory_str,
+        })
+        self.state.adjusted_level = diagnosis_result.get("adjusted_level", self.state.current_level)
+        self.state.difficulties = diagnosis_result.get("difficulties", [])
+        self.state.priority_focus = diagnosis_result.get("priority_focus", [])
+
+        # ── Étape 3 : Planification ──────────────────────────────────────────
+        self.state.agent_trace.append("Étape 3: Planification stratégique.")
+        planning_chain = self._build_planning_chain()
+        planning_result = await planning_chain.ainvoke({
+            "topic": self.state.topic,
+            "adjusted_level": self.state.adjusted_level,
+            "difficulties": str(self.state.difficulties),
+            "rag_context": rag_context_str[:1000],
+            "objectives": str(self.state.learning_objectives),
+        })
+        self.state.strategy = planning_result.get("strategy", [])
+        self.state.strategy_decisions = planning_result.get("strategy_decisions", [])
+
+        # ── Étape 4 : Génération d'exercices ─────────────────────────────────
+        self.state.agent_trace.append("Étape 4: Génération exercices.")
+        exercise_chain = self._build_exercise_chain()
+        exercise_result = await exercise_chain.ainvoke({
+            "topic": self.state.topic,
+            "adjusted_level": self.state.adjusted_level,
+            "objectives": str(self.state.learning_objectives),
+            "difficulties": str(self.state.difficulties),
+            "rag_context": rag_context_str[:800],
+        })
+        # La chain peut retourner une liste directement ou un dict avec clé
+        if isinstance(exercise_result, list):
+            self.state.suggested_exercises = exercise_result
+        elif isinstance(exercise_result, dict):
+            self.state.suggested_exercises = exercise_result.get(
+                "exercises", list(exercise_result.values())[0]
+                if exercise_result else []
             )
-            self.state.next_agent = "perception"
 
-            while (
-                self.state.next_agent is not None
-                and self.state.routing_iterations < MAX_ROUTING_ITERATIONS
-            ):
-                current = self.state.next_agent
-                self.state.routing_iterations += 1
-                self.state.agent_trace.append(
-                    f"Router [iter {self.state.routing_iterations}]: dispatch → '{current}'."
-                )
+        # ── Étape 5 : Vérification RAG + Persistance mémoire ─────────────────
+        self.state.agent_trace.append("Étape 5: Vérification RAG.")
+        verification = await self._run_verification(
+            self.state.suggested_exercises,
+            self.state.strategy
+        )
+        self.state.tool_results["verification"] = verification
 
-                if current == "web_enrichment":
-                    await self._handle_web_enrichment()
-                    continue
-
-                agent = self._registry.get(current)
-                if agent is None:
-                    self.state.agent_trace.append(
-                        f"Router: agent inconnu '{current}', arrêt de la boucle."
-                    )
-                    break
-
-                await agent.act()
-
-            if self.state.routing_iterations >= MAX_ROUTING_ITERATIONS:
-                self.state.agent_trace.append(
-                    f"AdaptiveTutorAgent: limite d'itérations ({MAX_ROUTING_ITERATIONS}) atteinte, "
-                    "arrêt de sécurité."
-                )
+        await self._persist_memory(self.state.suggested_exercises, verification)
 
         self.state.agent_trace.append(
-            f"AdaptiveTutorAgent: boucle terminée "
-            f"({'consensus' if self.state.consensus_reached else 'sans consensus'}, "
-            f"{self.state.routing_iterations} itération(s), "
-            f"{self.state.corrective_cycles} cycle(s) correctif(s))."
+            f"LangChain AdaptiveTutorAgent: terminé. "
+            f"Vérification: {verification.get('verdict', 'unknown')}."
         )
         return self.state
