@@ -95,5 +95,18 @@ CONTEXT_RETRIEVAL_CONFIG = {
         "fallback_to_web_search": True,        # DuckDuckGo si RAG vide
         "max_rag_chars_in_prompt": 1000,       # Limite contexte RAG dans le prompt
         "max_memory_items_in_prompt": 5,       # Limite mémoires dans le prompt
-    }
+    },
+    "react": {
+        "max_iterations": 10,           # Nombre max d'itérations de la boucle
+        "stop_on_final_answer": True,   # Arrêter dès tool_final_answer
+        "max_corrective_cycles": 2,     # Cycles correctifs max si vérification échoue
+        "verbose": True,                # Afficher le raisonnement dans les logs
+        "handle_parsing_errors": True,  # Gérer les erreurs de parsing LLM
+        "early_stopping": "generate",   # Comportement si max_iterations atteint
+        "mandatory_tools": [            # Outils obligatoires (vérifiés à la fin)
+            "tool_diagnose",
+            "tool_generate_exercises",
+            "tool_final_answer",
+        ],
+    },
 }

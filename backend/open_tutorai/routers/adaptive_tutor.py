@@ -1,6 +1,14 @@
+# backend/open_tutorai/routers/adaptive_tutor.py
+"""
+Adaptive Tutor router.
+
+The `use_langchain` flag has been removed — the ReAct agent is always used.
+Helper functions (assess_current_level, detect_difficulties, verify_adaptive_tutor_output)
+are kept here for backward compatibility with other call sites, but they now
+delegate to the pure helpers module.
+"""
+
 from typing import List, Optional, Dict, Any
-import re
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -8,45 +16,34 @@ from pydantic import BaseModel, Field
 from open_webui.internal.db import get_db
 from open_webui.utils.auth import get_verified_user
 from open_tutorai.agents.adaptive_tutor_agent import AdaptiveTutorAgent
+from open_tutorai.agents.helpers import (
+    assess_current_level as _assess_level,
+    detect_difficulties as _detect_difficulties,
+)
 from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG
 from open_tutorai.routers.context_retrieval import retrieve_pedagogical_documents
 
 router = APIRouter(tags=["adaptive"])
 
 
+# ─── Pydantic models ──────────────────────────────────────────────────────────
+
 class InteractionHistoryItem(BaseModel):
-    content: str = Field(..., description="User interaction content")
-    outcome: Optional[str] = Field(None, description="Outcome label, e.g. correct/incorrect")
-    score: Optional[float] = Field(None, description="Performance score from 0 to 1")
-    timestamp: Optional[float] = Field(None, description="Unix timestamp of the interaction")
+    content: str
+    outcome: Optional[str] = None
+    score: Optional[float] = None
+    timestamp: Optional[float] = None
 
 
 class AdaptiveTutorRequest(BaseModel):
     topic: str = Field(..., description="Learning topic or concept")
-    current_level: Optional[str] = Field(
-        "intermediate",
-        description="Current learner level: beginner, intermediate, advanced"
-    )
-    recent_interactions: Optional[List[InteractionHistoryItem]] = Field(
-        None,
-        description="Recent learner interactions with outcomes and scores"
-    )
-    feedback_comments: Optional[List[str]] = Field(
-        None,
-        description="Learner comments or feedback about difficulties"
-    )
-    learning_objectives: Optional[List[str]] = Field(
-        None,
-        description="Learning objectives that should shape the tutoring strategy"
-    )
-    preferred_exercise_types: Optional[List[str]] = Field(
-        None,
-        description="Preferred exercise types such as multiple-choice or worked examples"
-    )
-    use_langchain: Optional[bool] = Field(
-        True,   
-        description="Whether to use LangChain for orchestration (default: True)"
-    )
+    current_level: Optional[str] = Field("intermediate")
+    recent_interactions: Optional[List[InteractionHistoryItem]] = None
+    feedback_comments: Optional[List[str]] = None
+    learning_objectives: Optional[List[str]] = None
+    preferred_exercise_types: Optional[List[str]] = None
+    # NOTE: use_langchain removed — agent is always active
+
 
 class ExerciseSuggestion(BaseModel):
     id: str
@@ -95,242 +92,39 @@ class AdaptiveTutorResponse(BaseModel):
     notes: Optional[str] = None
 
 
-NEGATIVE_FEEDBACK_KEYWORDS = [
-    "confused",
-    "hard",
-    "difficult",
-    "struggle",
-    "mistake",
-    "wrong",
-    "lost",
-    "unclear",
-    "challenge",
-    "stuck"
-]
-
-LEVEL_ORDER = ["beginner", "intermediate", "advanced"]
-
-
-def normalize_level(level: Optional[str]) -> str:
-    if not level:
-        return "intermediate"
-    lower = level.lower()
-    return lower if lower in LEVEL_ORDER else "intermediate"
-
-
-def parse_feedback_difficulties(feedback_comments: List[str]) -> List[str]:
-    difficulties = []
-    for comment in feedback_comments:
-        text = comment.lower()
-        if any(keyword in text for keyword in NEGATIVE_FEEDBACK_KEYWORDS):
-            cleaned = text.replace("\n", " ").strip()
-            if len(cleaned) > 0:
-                difficulties.append(cleaned)
-    return difficulties
-
+# ─── Backward-compatible helpers ─────────────────────────────────────────────
 
 def assess_current_level(
     current_level: str,
     interactions: Optional[List[InteractionHistoryItem]],
-    feedback_comments: Optional[List[str]]
+    feedback_comments: Optional[List[str]],
 ) -> str:
-    level = normalize_level(current_level)
-    if not interactions and not feedback_comments:
-        return level
-
-    total_score = 0.0
-    scored_items = 0
-    difficulty_flags = 0
-
-    if interactions:
-        for item in interactions:
-            if item.score is not None:
-                total_score += max(0.0, min(item.score, 1.0))
-                scored_items += 1
-                if item.score < 0.6:
-                    difficulty_flags += 1
-            if item.outcome and item.outcome.lower() in ["incorrect", "wrong", "failed"]:
-                difficulty_flags += 1
-
-    if feedback_comments:
-        difficulty_flags += len(parse_feedback_difficulties(feedback_comments))
-
-    average_score = total_score / scored_items if scored_items else 0.7
-
-    if average_score >= 0.85 and difficulty_flags == 0:
-        if level == "beginner":
-            return "intermediate"
-        if level == "intermediate":
-            return "advanced"
-    if average_score <= 0.55 or difficulty_flags >= 2:
-        if level == "advanced":
-            return "intermediate"
-        if level == "intermediate":
-            return "beginner"
-
-    return level
+    """Thin wrapper so existing call sites (e.g. tools/diagnose) still work."""
+    raw = [i.dict() for i in interactions] if interactions else []
+    return _assess_level(current_level, raw, feedback_comments)
 
 
 def detect_difficulties(
     topic: str,
     interactions: Optional[List[InteractionHistoryItem]],
     feedback_comments: Optional[List[str]],
-    learning_objectives: Optional[List[str]]
-) -> List[str]:
-    difficulties = []
-    if feedback_comments:
-        difficulties.extend(parse_feedback_difficulties(feedback_comments))
-
-    if interactions:
-        for item in interactions:
-            if item.score is not None and item.score < 0.6:
-                label = item.outcome or "low performance"
-                difficulties.append(f"Difficulté avec l'interaction : {label}")
-            if item.content and topic.lower() in item.content.lower():
-                if item.score is not None and item.score < 0.6:
-                    difficulties.append(f"Compréhension de {topic} insuffisante")
-
-    if learning_objectives:
-        for objective in learning_objectives:
-            if any(keyword in objective.lower() for keyword in ["understand", "comprehend", "maîtriser"]):
-                difficulties.append(f"Objectif à clarifier: {objective}")
-
-    unique_difficulties = []
-    for difficulty in difficulties:
-        if difficulty not in unique_difficulties:
-            unique_difficulties.append(difficulty)
-    return unique_difficulties[:5]
-
-
-def build_exercise_prompt(topic: str, level: str, objective: Optional[str], index: int) -> Dict[str, str]:
-    base_topic = topic.capitalize()
-    difficulty_descriptor = {
-        "beginner": "simple",
-        "intermediate": "standard",
-        "advanced": "challenging"
-    }[level]
-
-    if objective:
-        prompt = f"Propose un exercice {difficulty_descriptor} sur {base_topic} axé sur {objective}."
-    else:
-        prompt = f"Propose un exercice {difficulty_descriptor} sur {base_topic} avec une correction pas à pas."
-
-    return {
-        "question": f"Exercice {index}: {prompt}",
-        "hint": f"Réfléchis aux éléments fondamentaux de {topic}.",
-        "answer": f"Réponse attendue pour l'exercice {index} sur {topic}.",
-        "skill_target": objective or f"Maîtrise de {topic}"
-    }
-
-
-def generate_exercises(
-    topic: str,
-    level: str,
     learning_objectives: Optional[List[str]],
-    preferred_exercise_types: Optional[List[str]],
-    count: int = 3
-) -> List[Dict[str, Any]]:
-    objectives = learning_objectives or []
-    exercises = []
-    for idx in range(1, count + 1):
-        objective = objectives[idx - 1] if idx - 1 < len(objectives) else None
-        exercise = build_exercise_prompt(topic, level, objective, idx)
-        exercises.append({
-            "id": f"exercise_{idx}",
-            "difficulty": level,
-            "question": exercise["question"],
-            "hint": exercise["hint"],
-            "answer": exercise["answer"],
-            "skill_target": exercise["skill_target"]
-        })
-    return exercises
-
-
-def plan_learning_strategy(
-    topic: str,
-    adjusted_level: str,
-    difficulties: List[str],
-    feedback_comments: Optional[List[str]]
 ) -> List[str]:
-    strategy = []
-    focus = []
-
-    if difficulties:
-        primary = difficulties[0]
-        strategy.append(
-            f"Se concentrer immédiatement sur la difficulté principale : {primary}."
-        )
-        focus.append(primary)
-        strategy.append(
-            f"Revoir le concept de base lié à {topic} avant de proposer de nouveaux exercices."
-        )
-        strategy.append(
-            f"Proposer des exercices guidés adaptés au niveau {adjusted_level} et bâtir la confiance sur des points précis."
-        )
-        strategy.append(
-            "Utiliser le feedback de l'apprenant pour ajuster la progression en temps réel, sans simplement offrir des options."
-        )
-    else:
-        strategy.append(
-            f"Le niveau actuel est stable ({adjusted_level}). Continuer avec des exercices progressifs sur {topic}."
-        )
-        strategy.append(
-            "Renforcer les acquis avec une pratique ciblée, puis vérifier la compréhension par un court auto-test."
-        )
-        strategy.append(
-            "Surveiller les retours de l'apprenant pour détecter toute difficulté émergente."
-        )
-
-    if feedback_comments:
-        combined_feedback = " ".join(feedback_comments[:2])
-        strategy.append(
-            f"Prendre en compte les retours suivants : {combined_feedback}."
-        )
-
-    return strategy
-
-
-def _normalize_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip().lower())
-
-
-def _tokenize(text: str) -> List[str]:
-    return [token for token in re.findall(r"\w{4,}", text.lower())]
-
-
-def _is_text_supported(candidate: str, source_corpus: str, threshold: float = 0.15) -> bool:
-    candidate_tokens = _tokenize(candidate)
-    if not candidate_tokens or not source_corpus:
-        return False
-
-    source_tokens = set(_tokenize(source_corpus))
-    match_count = sum(1 for token in candidate_tokens if token in source_tokens)
-    return (match_count / len(candidate_tokens)) >= threshold
-
-
-def _build_verification_candidates(
-    request: AdaptiveTutorRequest,
-    exercises: List[Dict[str, Any]],
-    strategy: List[str]
-) -> List[str]:
-    candidates = [request.topic]
-    if request.learning_objectives:
-        candidates.extend(request.learning_objectives)
-    for exercise in exercises:
-        candidates.append(exercise["question"])
-        candidates.append(exercise["answer"])
-    candidates.extend(strategy)
-    return [c for c in candidates if c and c.strip()]
+    raw = [i.dict() for i in interactions] if interactions else []
+    return _detect_difficulties(topic, raw, feedback_comments, learning_objectives)
 
 
 async def verify_adaptive_tutor_output(
     user_id: str,
-    request: AdaptiveTutorRequest,
+    request,  # duck-typed: needs .topic and .learning_objectives
     exercises: List[Dict[str, Any]],
-    strategy: List[str]
+    strategy: List[str],
 ) -> VerificationReport:
-    rag_config = CONTEXT_RETRIEVAL_CONFIG.get("rag", {})
-    if not rag_config.get("verification_enabled", False):
+    """RAG verification — kept for backward compatibility with tool_verify."""
+    from open_tutorai.agents.helpers import is_text_supported
+
+    rag_cfg = CONTEXT_RETRIEVAL_CONFIG.get("rag", {})
+    if not rag_cfg.get("verification_enabled", False):
         return VerificationReport(
             verified=False,
             support_score=0.0,
@@ -338,17 +132,15 @@ async def verify_adaptive_tutor_output(
             unsupported_items=[],
             sources=[],
             verdict="verification_disabled",
-            note="La vérification RAG est désactivée dans la configuration."
+            note="La vérification RAG est désactivée.",
         )
 
     query = request.topic
-    if request.learning_objectives:
+    if getattr(request, "learning_objectives", None):
         query += " " + " ".join(request.learning_objectives)
 
     sources = await retrieve_pedagogical_documents(
-        user_id,
-        query,
-        top_k=rag_config.get("top_k_documents", 5)
+        user_id, query, top_k=rag_cfg.get("top_k_documents", 5)
     )
 
     if not sources:
@@ -359,77 +151,71 @@ async def verify_adaptive_tutor_output(
             unsupported_items=[],
             sources=[],
             verdict="no_sources_found",
-            note=(
-                "Aucune source vérifiée n'a été trouvée. "
-                "La vérification nécessite un système RAG ou des documents locaux disponibles."
-            )
+            note="Aucune source trouvée.",
         )
 
-    source_corpus = " ".join([src.get("content", "") for src in sources])
-    candidates = _build_verification_candidates(request, exercises, strategy)
+    corpus = " ".join(s.get("content", "") for s in sources)
 
-    supported_items = []
-    unsupported_items = []
-    for candidate in candidates:
-        if _is_text_supported(candidate, source_corpus):
-            supported_items.append(candidate)
-        else:
-            unsupported_items.append(candidate)
+    candidates = [request.topic]
+    if getattr(request, "learning_objectives", None):
+        candidates.extend(request.learning_objectives)
+    for ex in exercises:
+        candidates += [ex.get("question", ""), ex.get("answer", "")]
+    candidates.extend(strategy)
+    candidates = [c for c in candidates if c and c.strip()]
 
-    support_score = len(supported_items) / max(1, len(candidates))
-    threshold = rag_config.get("verification_threshold", 0.65)
-    verified = support_score >= threshold
-    verdict = "supported" if verified else "needs_review"
+    supported, unsupported = [], []
+    for c in candidates:
+        (supported if is_text_supported(c, corpus) else unsupported).append(c)
+
+    score = len(supported) / max(1, len(candidates))
+    threshold = rag_cfg.get("verification_threshold", 0.65)
+    verdict = "supported" if score >= threshold else "needs_review"
 
     return VerificationReport(
-        verified=verified,
-        support_score=round(support_score, 3),
-        supported_items=supported_items,
-        unsupported_items=unsupported_items,
+        verified=score >= threshold,
+        support_score=round(score, 3),
+        supported_items=supported,
+        unsupported_items=unsupported,
         sources=[
             VerificationSource(
-                source_id=src.get("id", ""),
-                title=src.get("metadata", {}).get("title"),
-                preview=(src.get("content", "")[:280] + "...") if len(src.get("content", "")) > 280 else src.get("content", ""),
-                relevance_score=round(src.get("relevance_score", 0.0), 3),
-                path=src.get("metadata", {}).get("path")
+                source_id=s.get("id", ""),
+                title=s.get("metadata", {}).get("title"),
+                preview=s.get("content", "")[:280],
+                relevance_score=round(s.get("relevance_score", 0.0), 3),
+                path=s.get("metadata", {}).get("path"),
             )
-            for src in sources
+            for s in sources
         ],
         verdict=verdict,
         note=(
-            "Vérification terminée à l'aide des sources RAG locales. "
-            "Les éléments non appuyés doivent être relus ou enrichis."
-            if verified else
-            "Certains éléments n'ont pas pu être appuyés par les sources disponibles."
-        )
+            "Vérification terminée via sources RAG locales."
+            if score >= threshold
+            else "Certains éléments non appuyés par les sources."
+        ),
     )
 
+
+# ─── Standalone verification endpoint ────────────────────────────────────────
 
 class AdaptiveTutorVerificationRequest(BaseModel):
-    topic: str = Field(..., description="Sujet ou question du tutoriel à vérifier")
-    generated_texts: List[str] = Field(..., description="Textes ou énoncés générés par le tutor à vérifier")
-    learning_objectives: Optional[List[str]] = Field(
-        None,
-        description="Objectifs pédagogiques utilisés pour orienter la vérification"
-    )
+    topic: str
+    generated_texts: List[str]
+    learning_objectives: Optional[List[str]] = None
 
 
 @router.post("/adaptive/verify", response_model=VerificationReport)
 async def verify_adaptive_output(
     request: AdaptiveTutorVerificationRequest,
-    user=Depends(get_verified_user)
+    user=Depends(get_verified_user),
 ):
-    rag_config = CONTEXT_RETRIEVAL_CONFIG.get("rag", {})
-    if not rag_config.get("verification_enabled", False):
+    from open_tutorai.agents.helpers import is_text_supported
+
+    rag_cfg = CONTEXT_RETRIEVAL_CONFIG.get("rag", {})
+    if not rag_cfg.get("verification_enabled", False):
         return VerificationReport(
-            verified=False,
-            support_score=0.0,
-            supported_items=[],
-            unsupported_items=[],
-            sources=[],
-            verdict="verification_disabled",
-            note="La vérification RAG est désactivée dans la configuration."
+            verified=False, support_score=0.0, supported_items=[],
+            unsupported_items=[], sources=[], verdict="verification_disabled",
         )
 
     query = request.topic
@@ -437,75 +223,86 @@ async def verify_adaptive_output(
         query += " " + " ".join(request.learning_objectives)
 
     sources = await retrieve_pedagogical_documents(
-        user.id,
-        query,
-        top_k=rag_config.get("top_k_documents", 5)
+        user.id, query, top_k=rag_cfg.get("top_k_documents", 5)
     )
+    corpus = " ".join(s.get("content", "") for s in sources)
 
-    source_corpus = " ".join([src.get("content", "") for src in sources])
-    supported_items = []
-    unsupported_items = []
+    supported, unsupported = [], []
     for text in request.generated_texts:
-        if _is_text_supported(text, source_corpus):
-            supported_items.append(text)
-        else:
-            unsupported_items.append(text)
+        (supported if is_text_supported(text, corpus) else unsupported).append(text)
 
-    support_score = len(supported_items) / max(1, len(request.generated_texts))
-    verified = support_score >= rag_config.get("verification_threshold", 0.65)
-    verdict = "supported" if verified else "needs_review"
+    score = len(supported) / max(1, len(request.generated_texts))
+    verdict = "supported" if score >= rag_cfg.get("verification_threshold", 0.65) else "needs_review"
 
     return VerificationReport(
-        verified=verified,
-        support_score=round(support_score, 3),
-        supported_items=supported_items,
-        unsupported_items=unsupported_items,
+        verified=score >= rag_cfg.get("verification_threshold", 0.65),
+        support_score=round(score, 3),
+        supported_items=supported,
+        unsupported_items=unsupported,
         sources=[
             VerificationSource(
-                source_id=src.get("id", ""),
-                title=src.get("metadata", {}).get("title"),
-                preview=(src.get("content", "")[:280] + "...") if len(src.get("content", "")) > 280 else src.get("content", ""),
-                relevance_score=round(src.get("relevance_score", 0.0), 3),
-                path=src.get("metadata", {}).get("path")
+                source_id=s.get("id", ""),
+                title=s.get("metadata", {}).get("title"),
+                preview=s.get("content", "")[:280],
+                relevance_score=round(s.get("relevance_score", 0.0), 3),
+                path=s.get("metadata", {}).get("path"),
             )
-            for src in sources
+            for s in sources
         ],
         verdict=verdict,
-        note=(
-            "Vérification terminée à l'aide des sources RAG locales. "
-            "Les éléments non appuyés doivent être relus ou enrichis."
-            if verified else
-            "Certains éléments n'ont pas pu être appuyés par les sources disponibles."
-        )
     )
 
+
+# ─── Main adaptive plan endpoint ──────────────────────────────────────────────
 
 @router.post("/adaptive/plan", response_model=AdaptiveTutorResponse)
 async def create_adaptive_plan(
     request: AdaptiveTutorRequest,
     user=Depends(get_verified_user),
-    db=Depends(get_db)
+    db=Depends(get_db),
 ):
     try:
-        # use_langchain=True par défaut désormais
         agent = AdaptiveTutorAgent(
             user_id=user.id,
             request_data=request.dict(),
             db=db,
-            use_langchain=True,  # LangChain est maintenant l'orchestrateur par défaut
         )
         state = await agent.run()
-        
-        return {
-            "adjusted_level": state.adjusted_level,
-            "detected_difficulties": state.difficulties,
-            "suggested_exercises": [ExerciseSuggestion(**exercise) for exercise in state.suggested_exercises],
-            "strategy": state.strategy,
-            "strategy_decisions": state.strategy_decisions,
-            "priority_focus": state.priority_focus or [f"Renforcer {request.topic}"],
-            "verification": state.tool_results.get("verification"),
-            "agent_trace": state.agent_trace,
-            "notes": " ".join(state.reflection_notes) if state.reflection_notes else None,
-        }
+
+        # Prefer the consolidated final_answer produced by tool_final_answer
+        if state.final_answer:
+            fa = state.final_answer
+            return AdaptiveTutorResponse(
+                adjusted_level=fa.get("adjusted_level", "intermediate"),
+                detected_difficulties=fa.get("detected_difficulties", []),
+                suggested_exercises=[
+                    ExerciseSuggestion(**ex)
+                    for ex in fa.get("suggested_exercises", [])
+                    if all(k in ex for k in ["id", "difficulty", "question", "hint", "answer", "skill_target"])
+                ],
+                strategy=fa.get("strategy", []),
+                strategy_decisions=fa.get("strategy_decisions"),
+                priority_focus=fa.get("priority_focus", [f"Renforcer {request.topic}"]),
+                verification=fa.get("verification"),
+                agent_trace=fa.get("agent_trace", []),
+                notes=(
+                    f"ReAct: {fa.get('react_iterations', 0)} itérations, "
+                    f"outils: {', '.join(fa.get('tools_used', []))}"
+                ),
+            )
+
+        # Fallback: read from state directly if tool_final_answer was not called
+        return AdaptiveTutorResponse(
+            adjusted_level=state.adjusted_level,
+            detected_difficulties=state.difficulties,
+            suggested_exercises=[ExerciseSuggestion(**ex) for ex in state.suggested_exercises],
+            strategy=state.strategy,
+            strategy_decisions=state.strategy_decisions,
+            priority_focus=state.priority_focus or [f"Renforcer {request.topic}"],
+            verification=state.verification,
+            agent_trace=state.agent_trace,
+            notes="Fallback: tool_final_answer non appelé",
+        )
+
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Adaptive tutor plan failed: {str(exc)}")
+        raise HTTPException(status_code=500, detail=f"ReAct agent failed: {exc}")
