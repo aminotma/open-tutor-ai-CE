@@ -9,7 +9,7 @@ from langchain_openai import ChatOpenAI
 from open_tutorai.agents import state_registry as registry
 from open_tutorai.agents.prompts import build_system_prompt
 from open_tutorai.agents.state import AdaptiveTutorState, AgentStep
-from open_tutorai.agents.tools import ALL_TOOLS
+from open_tutorai.agents.tools import ALL_TOOLS, tool_persist_memory, tool_final_answer
 from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG
 
 
@@ -22,9 +22,8 @@ class AdaptiveTutorAgent:
         state = await agent.run()
     """
 
-    def __init__(self, user_id: str, request_data: dict, db):
+    def __init__(self, user_id: str, request_data: dict):
         self.user_id = user_id
-        self.db = db
         self.config = CONTEXT_RETRIEVAL_CONFIG
 
         # Unique run identifier — isolates this invocation from all others
@@ -52,8 +51,8 @@ class AdaptiveTutorAgent:
     async def run(self) -> AdaptiveTutorState:
         """Run the ReAct loop and return the final state."""
 
-        # Register state + dependencies in the thread-safe registry
-        registry.register(self.run_id, self.initial_state, self.user_id, self.db)
+        # Register state in the thread-safe registry
+        registry.register(self.run_id, self.initial_state, self.user_id)
 
         try:
             return await self._execute()
@@ -163,6 +162,8 @@ Thought:{agent_scratchpad}"""
                 )
             registry.update_state(self.run_id, state)
 
+        self._enforce_mandatory_tools()
+
         state = registry.get_state(self.run_id)
         state = state.append_trace(
             f"ReAct terminé. Itérations : {state.iteration_count}. "
@@ -171,3 +172,58 @@ Thought:{agent_scratchpad}"""
         registry.update_state(self.run_id, state)
 
         return registry.get_state(self.run_id)
+
+    def _enforce_mandatory_tools(self) -> None:
+        """
+        After the ReAct loop, call any mandatory tool the LLM skipped.
+
+        - tool_persist_memory : always callable from state — generates summary inline.
+        - tool_final_answer   : called only when is_complete is still False.
+        - Other mandatory tools (diagnose, generate_exercises) cannot be run
+          retroactively; a warning is written to the agent trace.
+        """
+        mandatory = self.config.get("react", {}).get("mandatory_tools", [])
+        state = registry.get_state(self.run_id)
+        called = set(state.tools_called)
+        lc_config = {"configurable": {"run_id": self.run_id}}
+
+        # Enforce in order: persist first, then finalize
+        for tool_name in ["tool_persist_memory", "tool_final_answer"]:
+            if tool_name not in mandatory or tool_name in called:
+                continue
+
+            if tool_name == "tool_persist_memory":
+                state = registry.get_state(self.run_id)
+                verification = state.verification or {}
+                summary = (
+                    f"Session ReAct (enforced): topic={state.topic}, "
+                    f"niveau={state.adjusted_level}, "
+                    f"difficultés={', '.join(state.difficulties[:3]) or 'aucune'}, "
+                    f"vérification={verification.get('verdict', 'unknown')}, "
+                    f"outils={', '.join(called)}."
+                )
+                tool_persist_memory.invoke({"summary": summary}, config=lc_config)
+                state = registry.get_state(self.run_id)
+                state = state.append_trace(
+                    "[enforce] tool_persist_memory appelé automatiquement (non invoqué par le LLM)"
+                )
+                registry.update_state(self.run_id, state)
+
+            elif tool_name == "tool_final_answer":
+                state = registry.get_state(self.run_id)
+                if not state.is_complete:
+                    tool_final_answer.invoke({}, config=lc_config)
+                    state = registry.get_state(self.run_id)
+                    state = state.append_trace(
+                        "[enforce] tool_final_answer appelé automatiquement (non invoqué par le LLM)"
+                    )
+                    registry.update_state(self.run_id, state)
+
+        # Warn about mandatory tools that cannot be enforced retroactively
+        state = registry.get_state(self.run_id)
+        for tool_name in mandatory:
+            if tool_name not in called and tool_name not in {"tool_persist_memory", "tool_final_answer"}:
+                state = state.append_trace(
+                    f"[enforce] WARNING: mandatory tool '{tool_name}' was not called"
+                )
+        registry.update_state(self.run_id, state)

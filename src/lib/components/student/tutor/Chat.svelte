@@ -80,6 +80,7 @@
 	} from '$lib/apis';
 	import { getTools } from '$lib/apis/tools';
 	import { getSupportById } from '$lib/apis/supports';
+	import { captureChatExchange, retrieveContext } from '$lib/apis/context';
 
 	import Banner from '$lib/components/common/Banner.svelte';
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
@@ -1473,6 +1474,21 @@
 				message.id,
 				createMessagesList(history, message.id)
 			);
+
+			// Fire-and-forget: capture exchange for memory persistence
+			const _userContent = history.messages[message.parentId]?.content ?? '';
+			if (_userContent && message.content && $chatId) {
+				let _topic = '';
+				try {
+					_topic = JSON.parse(localStorage.getItem('pendingSupportData') ?? '{}')?.title ?? '';
+				} catch { /* ignore */ }
+				captureChatExchange(localStorage.token, {
+					user_message: _userContent,
+					assistant_response: message.content,
+					chat_id: $chatId,
+					topic: _topic
+				});
+			}
 		}
 
 		console.log(data);
@@ -2005,11 +2021,49 @@
 						: ''
 				}`;
 
+		// Retrieve learner context from memory and knowledge base, inject into system prompt
+		let _learnerContextSection = '';
+		try {
+			const _ctxParts: string[] = [];
+
+			// Always include the learner's name so the tutor can address them personally
+			const _learnerName = $user?.name ?? '';
+			if (_learnerName) {
+				_ctxParts.push(`Learner name: ${_learnerName} — address the learner by this name naturally throughout the conversation.`);
+			}
+
+			const _userMsgContent = _history.messages[responseMessage?.parentId]?.content ?? '';
+			if (_userMsgContent) {
+				let _ctxTopic = '';
+				let _ctxObjectives: string[] = [];
+				try {
+					const _sd = JSON.parse(localStorage.getItem('pendingSupportData') ?? '{}');
+					_ctxTopic = _sd?.title ?? '';
+					if (_sd?.learning_objective) _ctxObjectives = [_sd.learning_objective];
+				} catch { /* ignore */ }
+				const _ctx = await retrieveContext(localStorage.token, {
+					query: _userMsgContent.slice(0, 300),
+					max_results: 5,
+					topic: _ctxTopic,
+					learning_objectives: _ctxObjectives.length ? _ctxObjectives : undefined
+				});
+				if (_ctx && _ctx.length > 0) {
+					_ctxParts.push(
+						..._ctx.map((c) => `- [${c.source}] ${c.content_preview.slice(0, 150)}`)
+					);
+				}
+			}
+
+			if (_ctxParts.length > 0) {
+				_learnerContextSection = `\n\n## Learner Context\n${_ctxParts.join('\n')}`;
+			}
+		} catch { /* non-blocking — context enrichment must never break the chat */ }
+
 		let messages = [
 			{
 				role: 'system',
 				// If we have system messages from support context, prioritize them
-				content: combinedSystemPrompt || baseSystemContent
+				content: (combinedSystemPrompt || baseSystemContent) + _learnerContextSection
 			},
 			// Only include non-system messages in the conversation
 			...createMessagesList(_history, responseMessageId)

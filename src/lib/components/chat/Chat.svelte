@@ -12,7 +12,7 @@
 
 	import { get, type Unsubscriber, type Writable } from 'svelte/store';
 	import type { i18n as i18nType } from 'i18next';
-	import { TUTOR_BASE_URL } from '$lib/constants';
+	import { TUTOR_BASE_URL, TUTOR_API_BASE_URL } from '$lib/constants';
 
 	import {
 		chatId,
@@ -75,6 +75,7 @@
 		stopTask
 	} from '$lib/apis';
 	import { getTools } from '$lib/apis/tools';
+	import { uploadFile } from '$lib/apis/files';
 
 	import Banner from '../common/Banner.svelte';
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
@@ -92,14 +93,14 @@
 	let loading = false;
 
 	const eventTarget = new EventTarget();
-	let controlPane;
-	let controlPaneComponent;
+	let controlPane: any;
+	let controlPaneComponent: any;
 
 	let autoScroll = true;
 	let processing = '';
 	let messagesContainerElement: HTMLDivElement;
 
-	let navbarElement;
+	let navbarElement: HTMLElement | null;
 
 	let showEventConfirmation = false;
 	let eventConfirmationTitle = '';
@@ -107,7 +108,7 @@
 	let eventConfirmationInput = false;
 	let eventConfirmationInputPlaceholder = '';
 	let eventConfirmationInputValue = '';
-	let eventCallback = null;
+	let eventCallback: ((result?: any) => void) | null = null;
 
 	let chatIdUnsubscriber: Unsubscriber | undefined;
 
@@ -116,25 +117,28 @@
 	let selectedModelIds = [];
 	$: selectedModelIds = atSelectedModel !== undefined ? [atSelectedModel.id] : selectedModels;
 
-	let selectedToolIds = [];
+	let selectedToolIds: string[] = [];
 	let imageGenerationEnabled = false;
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
-	let chat = null;
-	let tags = [];
+	let chat: any = null;
+	let tags: any[] = [];
 
-	let history = {
+	let history: {
+		messages: Record<string, any>;
+		currentId: string | null;
+	} = {
 		messages: {},
 		currentId: null
 	};
 
-	let taskId = null;
+	let taskId: string | null = null;
 
 	// Chat Input
 	let prompt = '';
-	let chatFiles = [];
-	let files = [];
-	let params = {};
+	let chatFiles: any[] = [];
+	let files: any[] = [];
+	let params: Record<string, any> = {};
 
 	// Make avatarActive reactive to settings changes
 	// This ensures avatarActive updates whenever settings.avatarEnabled changes
@@ -264,15 +268,27 @@
 			return;
 		}
 
-		const model = atSelectedModel ?? $models.find((m) => m.id === selectedModels[0]);
+		const model = atSelectedModel ?? $models.find((m: Model) => m.id === selectedModels[0]);
 		if (model) {
-			selectedToolIds = (model?.info?.meta?.toolIds ?? []).filter((id) =>
-				$tools.find((t) => t.id === id)
-			);
+			selectedToolIds = (model?.info?.meta?.toolIds ?? []).filter((id: string) =>
+				$tools?.find((t: any) => t.id === id)
+			) ?? [];
 		}
 	};
 
-	const showMessage = async (message) => {
+	// Toggle avatar mode function
+	const toggleAvatar = () => {
+		// Update settings store and localStorage
+		settings.update((s) => {
+			const updatedSettings = { ...s };
+			(updatedSettings as any).avatarEnabled = !(($settings as any)?.avatarEnabled);
+			return updatedSettings;
+		});
+		// Save to localStorage for persistence
+		localStorage.setItem('settings', JSON.stringify($settings));
+	};
+
+	const showMessage = async (message: any) => {
 		const _chatId = JSON.parse(JSON.stringify($chatId));
 		let _messageId = JSON.parse(JSON.stringify(message.id));
 
@@ -298,7 +314,7 @@
 		saveChatHandler(_chatId, history);
 	};
 
-	const chatEventHandler = async (event, cb) => {
+	const chatEventHandler = async (event: any, cb: any) => {
 		console.log(event);
 
 		if (event.chat_id === $chatId) {
@@ -539,13 +555,13 @@
 
 	// File upload functions
 
-	const uploadGoogleDriveFile = async (fileData) => {
+	const uploadGoogleDriveFile = async (fileData: any) => {
 		console.log('Starting uploadGoogleDriveFile with:', {
 			id: fileData.id,
 			name: fileData.name,
 			url: fileData.url,
 			headers: {
-				Authorization: `Bearer ${token}`
+				Authorization: `Bearer ${localStorage.token}`
 			}
 		});
 
@@ -642,18 +658,19 @@
 
 			files = files;
 			toast.success($i18n.t('File uploaded successfully'));
-		} catch (e) {
+		} catch (e: unknown) {
 			console.error('Error uploading file:', e);
 			files = files.filter((f) => f.itemId !== tempItemId);
+			const errorMessage = e instanceof Error ? e.message : 'Unknown error';
 			toast.error(
 				$i18n.t('Error uploading file: {{error}}', {
-					error: e.message || 'Unknown error'
+					error: errorMessage
 				})
 			);
 		}
 	};
 
-	const uploadWeb = async (url) => {
+	const uploadWeb = async (url: any) => {
 		console.log(url);
 
 		const fileItem = {
@@ -679,14 +696,15 @@
 
 				files = files;
 			}
-		} catch (e) {
+		} catch (e: unknown) {
 			// Remove the failed doc from the files array
 			files = files.filter((f) => f.name !== url);
-			toast.error(JSON.stringify(e));
+			const errorMessage = e instanceof Error ? e.message : String(e);
+			toast.error(errorMessage);
 		}
 	};
 
-	const uploadYoutubeTranscription = async (url) => {
+	const uploadYoutubeTranscription = async (url: any) => {
 		console.log(url);
 
 		const fileItem = {
@@ -706,16 +724,17 @@
 			if (res) {
 				fileItem.status = 'uploaded';
 				fileItem.collection_name = res.collection_name;
-				fileItem.file = {
-					...res.file,
-					...fileItem.file
+				(fileItem as any).file = {
+					...(res as any).file,
+					...(fileItem as any).file
 				};
 				files = files;
 			}
-		} catch (e) {
+		} catch (e: unknown) {
 			// Remove the failed doc from the files array
 			files = files.filter((f) => f.name !== url);
-			toast.error(`${e}`);
+			const errorMessage = e instanceof Error ? e.message : String(e);
+			toast.error(errorMessage);
 		}
 	};
 
@@ -725,11 +744,13 @@
 
 	const initNewChat = async () => {
 		if ($page.url.searchParams.get('models')) {
-			selectedModels = $page.url.searchParams.get('models')?.split(',');
+			const models = $page.url.searchParams.get('models');
+			selectedModels = models?.split(',') ?? [''];
 		} else if ($page.url.searchParams.get('model')) {
-			const urlModels = $page.url.searchParams.get('model')?.split(',');
+			const modelParam = $page.url.searchParams.get('model');
+			const urlModels = modelParam?.split(',') ?? [];
 
-			if (urlModels.length === 1) {
+			if (urlModels && urlModels.length === 1) {
 				const m = $models.find((m) => m.id === urlModels[0]);
 				if (!m) {
 					const modelSelectorButton = document.getElementById('model-selector-0-button');
@@ -779,7 +800,7 @@
 		await showArtifacts.set(false);
 
 		if ($page.url.pathname.includes('/c/')) {
-			window.history.replaceState(history.state, '', `/`);
+			window.history.replaceState(null, '', `/`);
 		}
 
 		autoScroll = true;
@@ -920,7 +941,7 @@
 			messagesContainerElement.scrollTop = messagesContainerElement.scrollHeight;
 		}
 	};
-	const chatCompletedHandler = async (chatId, modelId, responseMessageId, messages) => {
+	const chatCompletedHandler = async (chatId: any, modelId: any, responseMessageId: any, messages: any) => {
 		const res = await chatCompleted(localStorage.token, {
 			model: modelId,
 			messages: messages.map((m) => ({
@@ -977,7 +998,7 @@
 		}
 	};
 
-	const chatActionHandler = async (chatId, actionId, modelId, responseMessageId, event = null) => {
+	const chatActionHandler = async (chatId: any, actionId: any, modelId: any, responseMessageId: any, event: any = null) => {
 		const messages = createMessagesList(history, responseMessageId);
 
 		const res = await chatAction(localStorage.token, actionId, {
@@ -1040,13 +1061,13 @@
 		}, 1000);
 	};
 
-	const createMessagePair = async (userPrompt) => {
+	const createMessagePair = async (userPrompt: any) => {
 		prompt = '';
 		if (selectedModels.length === 0) {
 			toast.error($i18n.t('Model not selected'));
 		} else {
 			const modelId = selectedModels[0];
-			const model = $models.filter((m) => m.id === modelId).at(0);
+			const model = $models.filter((m: any) => m.id === modelId).at(0);
 
 			const messages = createMessagesList(history, history.currentId);
 			const parentMessage = messages.length !== 0 ? messages.at(-1) : null;
@@ -1072,7 +1093,7 @@
 				done: true,
 
 				model: modelId,
-				modelName: model.name ?? model.id,
+				modelName: model?.name ?? model?.id ?? '',
 				modelIdx: 0,
 				timestamp: Math.floor(Date.now() / 1000)
 			};
@@ -1100,8 +1121,8 @@
 		}
 	};
 
-	const addMessages = async ({ modelId, parentId, messages }) => {
-		const model = $models.filter((m) => m.id === modelId).at(0);
+	const addMessages = async ({ modelId, parentId, messages }: { modelId: any; parentId: any; messages: any }) => {
+		const model = $models.filter((m: any) => m.id === modelId).at(0);
 
 		let parentMessage = history.messages[parentId];
 		let currentParentId = parentMessage ? parentMessage.id : null;
@@ -1131,8 +1152,8 @@
 					parentId: currentParentId,
 					childrenIds: [],
 					done: true,
-					model: model.id,
-					modelName: model.name ?? model.id,
+					model: model?.id ?? '',
+					modelName: model?.name ?? model?.id ?? '',
 					modelIdx: 0,
 					timestamp: Math.floor(Date.now() / 1000),
 					...message
@@ -1163,7 +1184,7 @@
 		}
 	};
 
-	const chatCompletionEventHandler = async (data, message, chatId) => {
+	const chatCompletionEventHandler = async (data: any, message: any, chatId: any) => {
 		const { id, done, choices, content, sources, selected_model_id, error, usage } = data;
 
 		if (error) {
@@ -1320,7 +1341,7 @@
 	// Chat functions
 	//////////////////////////
 
-	const submitPrompt = async (userPrompt, { _raw = false } = {}) => {
+	const submitPrompt = async (userPrompt: any, { _raw = false } = {}) => {
 		console.log('submitPrompt', userPrompt, $chatId);
 
 		const messages = createMessagesList(history, history.currentId);
@@ -2159,7 +2180,7 @@
 				await chats.set(await getChatList(localStorage.token, $currentChatPage));
 				currentChatPage.set(1);
 
-				window.history.replaceState(history.state, '', `/c/${_chatId}`);
+				window.history.replaceState(null, '', `/c/${_chatId}`);
 				
 				if (typeof window !== 'undefined' && window.openTutorEvents) {
 					console.log('Dispatching chatCreated event with ID:', _chatId);

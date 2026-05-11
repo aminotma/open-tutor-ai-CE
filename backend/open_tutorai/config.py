@@ -1,3 +1,4 @@
+import os
 from open_tutorai.env import (
     ENABLE_SIGNUP,
     ENABLE_LOGIN_FORM,
@@ -6,6 +7,33 @@ from open_tutorai.env import (
 )
 from pydantic import BaseModel
 from typing import Optional
+
+
+def get_openai_api_key() -> str:
+    """
+    Return the OpenAI API key configured in the OpenWebUI admin interface.
+    Falls back to the OPENAI_API_KEY environment variable if app state is unavailable.
+    """
+    try:
+        from open_webui.main import app
+        keys = app.state.config.OPENAI_API_KEYS
+        if keys and keys[0]:
+            return keys[0]
+    except Exception:
+        pass
+    return os.environ.get("OPENAI_API_KEY", "")
+
+
+def get_openai_base_url() -> str:
+    """Return the OpenAI base URL configured in the OpenWebUI admin interface."""
+    try:
+        from open_webui.main import app
+        urls = app.state.config.OPENAI_API_BASE_URLS
+        if urls and urls[0]:
+            return urls[0]
+    except Exception:
+        pass
+    return os.environ.get("OPENAI_API_BASE_URL", "https://api.openai.com/v1")
 
 
 class AppConfig(BaseModel):
@@ -42,7 +70,8 @@ CONTEXT_RETRIEVAL_CONFIG = {
         "enabled": True,
         "top_k_summaries": 5,
         "cache_ttl_hours": 24,
-        "summarization_model": "gpt-3.5-turbo"
+        "summarization_model": "gpt-3.5-turbo",
+        "exchanges_per_summary": 5,   # generate a session summary every N exchanges
     },
     
     # Summarization Layer Configuration
@@ -106,6 +135,7 @@ CONTEXT_RETRIEVAL_CONFIG = {
         "mandatory_tools": [            # Outils obligatoires (vérifiés à la fin)
             "tool_diagnose",
             "tool_generate_exercises",
+            "tool_persist_memory",
             "tool_final_answer",
         ],
     },

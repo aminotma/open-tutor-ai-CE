@@ -44,6 +44,7 @@ export interface ContextRetrievalRequest {
 	memory_types?: ('episodic' | 'semantic' | 'procedural' | 'behavioral')[];
 	pedagogical_level?: 'beginner' | 'intermediate' | 'advanced';
 	learning_objectives?: string[];
+	topic?: string;
 }
 
 export interface ContextStatsResponse {
@@ -109,6 +110,10 @@ export const retrieveContext = async (
 
 	if (request.learning_objectives) {
 		body.learning_objectives = request.learning_objectives;
+	}
+
+	if (request.topic !== undefined) {
+		body.topic = request.topic;
 	}
 
 	const res = await fetch(url, {
@@ -363,4 +368,38 @@ export const getSourceLabel = (source: 'pedagogical' | 'memory' | 'summary'): st
 	};
 
 	return labelMap[source] || 'Unknown Source';
+};
+
+export interface ChatCapturePayload {
+	user_message: string;
+	assistant_response: string;
+	chat_id: string;
+	topic?: string;
+}
+
+export interface ChatCaptureResult {
+	created: string[];
+	chat_id: string;
+}
+
+/**
+ * Send a completed question/answer pair to the memory capture endpoint.
+ * Creates episodic, semantic, procedural and behavioral memories as appropriate.
+ * Designed to be called fire-and-forget (do not await).
+ */
+export const captureChatExchange = (
+	token: string,
+	payload: ChatCapturePayload
+): Promise<ChatCaptureResult | null> => {
+	return fetch(`${TUTOR_API_BASE_URL}/chat/capture`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify(payload)
+	})
+		.then((res) => (res.ok ? res.json() : null))
+		.catch(() => null);
 };

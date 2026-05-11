@@ -10,7 +10,7 @@ Results are filtered and ranked according to pedagogical relevance.
 """
 
 from enum import Enum
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, cast
 from uuid import uuid4
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -23,20 +23,32 @@ import tiktoken
 from pathlib import Path
 
 import chromadb
+from chromadb.api.shared_system_client import SharedSystemClient
 from chromadb.config import Settings
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from open_webui.internal.db import get_db
+from open_webui.internal.db import get_db, engine
 from open_webui.utils.auth import get_verified_user
-from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG
+from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG, get_openai_api_key, get_openai_base_url
 from open_tutorai.models.database import Memory
+from sqlalchemy.orm import sessionmaker
 
 from langchain_chroma import Chroma
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_core.documents import Document as LangChainDocument
+from langchain_openai import ChatOpenAI
 
 router = APIRouter(tags=["context"])
+
+
+def get_db_session():
+    """Get a database session using the same engine as OpenWebUI"""
+    Session = sessionmaker(bind=engine)
+    return Session()
+
 
 # ============================================================================
 # CHROMADB SETUP
@@ -59,10 +71,22 @@ def _get_chroma_client():
         # Chemin absolu : stable peu importe le répertoire de travail du processus
         db_path = Path(__file__).resolve().parents[2] / "data" / "vector_db"
         db_path.mkdir(parents=True, exist_ok=True)
-        _chroma_client = chromadb.PersistentClient(
-            path=str(db_path),
-            settings=Settings(anonymized_telemetry=False),
-        )
+        settings = Settings(anonymized_telemetry=False)
+        try:
+            _chroma_client = chromadb.PersistentClient(
+                path=str(db_path),
+                settings=settings,
+            )
+        except ValueError as e:
+            error_message = str(e)
+            if "An instance of Chroma already exists for" in error_message:
+                SharedSystemClient.clear_system_cache()
+                _chroma_client = chromadb.PersistentClient(
+                    path=str(db_path),
+                    settings=settings,
+                )
+            else:
+                raise
     return _chroma_client
 
 
@@ -89,14 +113,19 @@ def get_embedding_function() -> HuggingFaceEmbeddings:
         )
     return _embedding_function
 
-# Vectorstore LangChain — pointe sur le MÊME répertoire que l'ancien client
+# Vectorstore LangChain — utilise le même client ChromaDB
+_vectorstore = None
+
 def get_vectorstore() -> Chroma:
     """Retourne le vectorstore LangChain."""
-    return Chroma(
-        collection_name=DOCUMENTS_COLLECTION,
-        embedding_function=get_embedding_function(),
-        persist_directory="data/vector_db"
-    )
+    global _vectorstore
+    if _vectorstore is None:
+        _vectorstore = Chroma(
+            client=_get_chroma_client(),
+            collection_name=DOCUMENTS_COLLECTION,
+            embedding_function=get_embedding_function(),
+        )
+    return _vectorstore
 
 
 # ============================================================================
@@ -124,6 +153,9 @@ def index_document_to_chromadb(
             else:
                 clean_metadata[key] = json.dumps(value)
 
+        # Store the document id in metadata so we can recover it during retrieval
+        clean_metadata["doc_id"] = doc_id
+
         doc = LangChainDocument(
             page_content=content,
             metadata=clean_metadata
@@ -133,7 +165,7 @@ def index_document_to_chromadb(
 
         # Vérifie si déjà indexé via le client bas niveau
         try:
-            existing = chroma_client.get_collection(
+            existing = _get_chroma_client().get_collection(
                 DOCUMENTS_COLLECTION
             ).get(ids=[doc_id])
             if existing and existing.get("ids"):
@@ -152,6 +184,65 @@ def index_document_to_chromadb(
         return False
 
 
+def _extract_text_from_file(file_path: str) -> Optional[str]:
+    """Extract text from common document formats for indexing."""
+    path = Path(file_path)
+    suffix = path.suffix.lower()
+
+    try:
+        if suffix == ".pdf":
+            try:
+                from pypdf import PdfReader
+            except ImportError:
+                from PyPDF2 import PdfReader
+
+            reader = PdfReader(str(path))
+            text_parts = []
+            for page in reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text_parts.append(page_text)
+            return "\n\n".join(text_parts).strip()
+
+        if suffix == ".docx":
+            try:
+                import docx2txt
+                return docx2txt.process(str(path)) or ""
+            except Exception:
+                pass
+
+        if suffix == ".pptx":
+            try:
+                from pptx import Presentation
+                from pptx.shapes.base import BaseShape
+                
+                presentation = Presentation(str(path))
+                slides = []
+                for slide in presentation.slides:
+                    for shape in slide.shapes:
+                        shape_any = cast(Any, shape)
+                        if getattr(shape_any, "has_text_frame", False):
+                            text = getattr(shape_any, "text", None)
+                            if text:
+                                slides.append(text)
+                return "\n\n".join(slides).strip()
+            except Exception:
+                pass
+
+        if suffix in {".txt", ".md", ".json", ".csv", ".py", ".yaml", ".yml"}:
+            return path.read_text(encoding="utf-8", errors="ignore")
+
+        # Fallback: try reading as UTF-8 text
+        return path.read_text(encoding="utf-8", errors="ignore")
+
+    except Exception:
+        try:
+            with open(path, "rb") as f:
+                return f.read().decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+
+
 def index_uploaded_document_to_chromadb(file_path: str, user_id: str, title: str) -> bool:
     """
     Indexe un document uploadé par l'utilisateur dans ChromaDB.
@@ -167,67 +258,99 @@ def index_uploaded_document_to_chromadb(file_path: str, user_id: str, title: str
     try:
         from langchain_core.documents import Document as LangChainDocument
         from pathlib import Path
-        
-        # Vérifier que le fichier existe
+
         path = Path(file_path)
         if not path.exists():
             print(f"File not found: {file_path}")
             return False
-        
-        # Lire le contenu du fichier
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except Exception as e:
-            print(f"Error reading file {file_path}: {str(e)}")
-            # Essayer en mode binaire pour les fichiers non-texte
-            try:
-                with open(file_path, 'rb') as f:
-                    content = f.read().decode('utf-8', errors='ignore')
-            except Exception as e2:
-                print(f"Error decoding file {file_path}: {str(e2)}")
-                return False
-        
-        # Générer un ID unique pour le document
+
+        content = _extract_text_from_file(str(path))
+        if not content:
+            print(f"No text extracted from file: {file_path}")
+            return False
+
         doc_id = f"upload_{uuid4()}"
-        
-        # Préparer les métadonnées
+
         metadata = {
             "type": "uploaded_document",
             "source": "user_upload",
             "user_id": user_id,
             "title": title,
-            "file_path": file_path,
-            "indexed_at": datetime.now(timezone.utc).timestamp()
+            "file_name": path.name,
+            "file_path": str(path),
+            "file_type": path.suffix.lower().lstrip('.'),
+            "indexed_at": datetime.now(timezone.utc).timestamp(),
+            "doc_id": doc_id
         }
-        
-        # Nettoyage des métadonnées pour LangChain
+
         clean_metadata = {}
         for key, value in metadata.items():
             if isinstance(value, (str, int, float, bool)):
                 clean_metadata[key] = value
             else:
                 clean_metadata[key] = json.dumps(value)
-        
-        # Créer le document LangChain
+
         doc = LangChainDocument(
             page_content=content,
             metadata=clean_metadata
         )
-        
-        # Ajouter au vectorstore
+
         vectorstore = get_vectorstore()
         vectorstore.add_documents(
             documents=[doc],
             ids=[doc_id]
         )
-        
+
         print(f"Successfully indexed document: {title} (ID: {doc_id})")
         return True
-        
+
     except Exception as e:
         print(f"Error indexing uploaded document {file_path}: {str(e)}")
         return False
+
+
+def index_local_documents_to_chromadb(collection_name: str = DOCUMENTS_COLLECTION) -> int:
+    """Index local repository documents into ChromaDB."""
+    repo_root = Path(__file__).resolve().parents[3]
+    search_paths = [repo_root / "docs", repo_root / "backend"]
+    supported_exts = {".md", ".txt", ".json", ".pdf"}
+    indexed_count = 0
+    collection = get_or_create_collection(collection_name)
+
+    for base_path in search_paths:
+        if not base_path.exists():
+            continue
+
+        for file_path in base_path.rglob("*"):
+            if not file_path.is_file() or file_path.suffix.lower() not in supported_exts:
+                continue
+
+            doc_id = f"local_{file_path.relative_to(repo_root).as_posix()}"
+            try:
+                existing = collection.get(ids=[doc_id])
+                if existing and existing.get("ids"):
+                    continue
+            except Exception:
+                pass
+
+            content = _extract_text_from_file(str(file_path))
+            if not content:
+                continue
+
+            metadata = {
+                "type": "local_document",
+                "source": "repository",
+                "title": file_path.name,
+                "path": str(file_path.relative_to(repo_root)),
+                "file_type": file_path.suffix.lower().lstrip('.'),
+                "indexed_at": datetime.now(timezone.utc).timestamp(),
+                "doc_id": doc_id
+            }
+
+            if index_document_to_chromadb(doc_id, content, metadata, collection_name=collection_name):
+                indexed_count += 1
+
+    return indexed_count
 
 
 # ============================================================================
@@ -254,6 +377,33 @@ class ContextRetrievalRequest(BaseModel):
         None,
         description="Learning objectives to align retrieved context with user goals"
     )
+    topic: Optional[str] = Field(
+        None,
+        description="Current course/topic — isolates memories to this course. "
+                    "Empty string or None retrieves the 'general' bucket (no course active)."
+    )
+
+
+class DocumentInteractionRequest(BaseModel):
+    """Request model to record user interactions with a pedagogical document."""
+    interaction_type: Optional[str] = Field(
+        None,
+        description="Optional type of user interaction, e.g. 'view', 'select', 'answer_question'"
+    )
+    interaction_increment: int = Field(
+        1,
+        ge=1,
+        description="Number of interaction events to add to the document engagement count"
+    )
+    answered_questions_increment: Optional[int] = Field(
+        0,
+        ge=0,
+        description="Optional number of answered questions to increment for this document"
+    )
+    last_updated: Optional[float] = Field(
+        None,
+        description="Optional timestamp to set as last interaction time"
+    )
 
 
 class ScoresSchema(BaseModel):
@@ -274,6 +424,9 @@ class MetadataSchema(BaseModel):
     source_id: str = Field(..., description="Source identifier")
     title: Optional[str] = Field(None, description="Title if applicable")
     subject_domain: Optional[str] = Field(None, description="Subject domain")
+    source: Optional[str] = Field(None, description="Source of the pedagogical document")
+    interaction_count: Optional[int] = Field(None, description="Number of user interactions recorded for this document")
+    answered_questions: Optional[int] = Field(None, description="Number of answered questions associated with this document")
 
 
 class ContextRetrievalResponse(BaseModel):
@@ -305,51 +458,95 @@ class NormalizedContextItem:
 # SUMMARIZATION LAYER
 # ============================================================================
 
-def summarize_interactions(content: str, max_tokens: int = 500) -> str:
-    """
-    Summarize long interaction content to reduce context size
-    
-    Uses token-aware truncation to stay within limits
-    """
+def _summarize_mechanical(content: str, max_tokens: int = 500) -> str:
+    """Fallback: token-aware extraction of first/middle/last sentences."""
     if not content:
         return ""
-    
-    # Use tiktoken to count tokens (approximating GPT models)
     try:
-        enc = tiktoken.get_encoding("cl100k_base")  # GPT-3.5/4 encoding
+        enc = tiktoken.get_encoding("cl100k_base")
         tokens = enc.encode(content)
         if len(tokens) <= max_tokens:
             return content
     except Exception:
-        # Fallback to character count if tiktoken fails
-        if len(content) <= max_tokens * 4:  # Rough estimate: 4 chars per token
+        if len(content) <= max_tokens * 4:
             return content
         return content[:max_tokens * 4] + "..."
-    
-    # Extract key sentences and truncate to fit token limit
+
     sentences = [s.strip() for s in content.split('.') if s.strip()]
     if len(sentences) <= 3:
-        truncated_tokens = tokens[:max_tokens]
-        return enc.decode(truncated_tokens) + "..."
-    
-    # Extract first, middle, and last sentences
-    key_sentences = []
-    if sentences:
-        key_sentences.append(sentences[0])
+        return enc.decode(tokens[:max_tokens]) + "..."
+
+    key_sentences = [sentences[0]]
     middle_idx = len(sentences) // 2
-    if middle_idx != 0 and middle_idx != len(sentences) - 1:
+    if middle_idx not in (0, len(sentences) - 1):
         key_sentences.append(sentences[middle_idx])
     if len(sentences) > 1:
         key_sentences.append(sentences[-1])
-    
+
     summary = '. '.join(key_sentences)
     summary_tokens = enc.encode(summary)
     if len(summary_tokens) <= max_tokens:
         return summary
-    
-    # Truncate summary to fit
-    truncated_tokens = summary_tokens[:max_tokens - 10]  # Leave room for "..."
-    return enc.decode(truncated_tokens) + "..."
+    return enc.decode(summary_tokens[:max_tokens - 10]) + "..."
+
+
+_SUMMARIZE_PROMPT = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        "You are a pedagogical context summarizer. "
+        "Summarize the content below as concisely as possible, focusing on what is most "
+        "relevant to the learner's query. Return only the summary text — no preamble, no headings."
+    ),
+    (
+        "human",
+        "QUERY: {query}\n\nCONTENT:\n{content}"
+    ),
+])
+
+
+async def summarize_interactions(content: str, query: str = "", max_tokens: int = 500) -> str:
+    """
+    LLM-based summarizer: generates a coherent, query-relevant summary.
+    Falls back to mechanical sentence extraction on any error.
+    """
+    if not content:
+        return ""
+
+    # Skip LLM call when content already fits
+    try:
+        enc = tiktoken.get_encoding("cl100k_base")
+        if len(enc.encode(content)) <= max_tokens:
+            return content
+    except Exception:
+        if len(content) <= max_tokens * 4:
+            return content
+
+    lc_cfg = CONTEXT_RETRIEVAL_CONFIG.get("langchain", {})
+    llm = ChatOpenAI(
+        model=lc_cfg.get("llm_model", "gpt-4o-mini"),
+        temperature=0.0,
+        api_key=get_openai_api_key(),
+        base_url=get_openai_base_url(),
+    )
+    chain = _SUMMARIZE_PROMPT | llm
+
+    try:
+        result = await chain.ainvoke({
+            "query": query or "general context",
+            "content": content[:2000],
+        })
+        summary = result.content.strip()
+        # Enforce token budget on the LLM output
+        try:
+            enc = tiktoken.get_encoding("cl100k_base")
+            toks = enc.encode(summary)
+            if len(toks) > max_tokens:
+                return enc.decode(toks[:max_tokens]) + "..."
+        except Exception:
+            pass
+        return summary
+    except Exception:
+        return _summarize_mechanical(content, max_tokens)
 
 
 def sliding_window_filter(
@@ -477,7 +674,7 @@ def forget_irrelevant_context_items(
     return kept if kept else items[:1]
 
 
-def apply_summarization_layer(
+async def apply_summarization_layer(
     ranked_items: List[Dict],
     query: str,
     config: Dict
@@ -524,7 +721,7 @@ def apply_summarization_layer(
             
             # Then summarize if still too long
             if len(content) > max_content_length:
-                content = summarize_interactions(content, max_tokens=max_content_length // 4)
+                content = await summarize_interactions(content, query=query, max_tokens=max_content_length // 4)
         
         summarized_item["content"] = content
         summarized_item["original_length"] = len(item.get("content", ""))
@@ -631,13 +828,18 @@ async def retrieve_pedagogical_documents(
                 "source_type": "rag",
                 "content": lc_doc.page_content,
                 "metadata": {
+                    "type": metadata.get("type", "document"),
                     "title": metadata.get("title", doc_id),
                     "path": metadata.get("path", ""),
                     "source": metadata.get("source", "unknown"),
                     "file_type": metadata.get("file_type", ""),
                     "user_id": metadata.get("user_id", ""),
                     "indexed_at": metadata.get("indexed_at", ""),
-                    "uploaded_at": metadata.get("uploaded_at", "")
+                    "uploaded_at": metadata.get("uploaded_at", ""),
+                    "last_updated": metadata.get("last_updated"),
+                    "interaction_count": metadata.get("interaction_count", 0),
+                    "answered_questions": metadata.get("answered_questions", 0),
+                    "doc_id": doc_id
                 },
                 "relevance_score": vector_score,
                 "vector_score": vector_score
@@ -730,23 +932,24 @@ async def retrieve_internal_memory(
     query: str,
     memory_types: Optional[List[str]] = None,
     limit: int = 10,
-    db = None
+    db = None,
+    topic: Optional[str] = None,
 ) -> List[Dict]:
     """
-    Retrieve internal memories matching the query
-    
+    Retrieve internal memories matching the query with intelligent summarization and selection
+
     Source: opentutorai_memory table
-    Uses: a stronger relevance scoring model than simple text matching.
+    Uses: semantic relevance scoring with memory type prioritization and content summarization.
     """
     if db is None:
         return []
-    
+
     try:
         db_query = db.query(Memory).filter(Memory.user_id == user_id)
         if memory_types and len(memory_types) > 0:
             db_query = db_query.filter(Memory.memory_type.in_(memory_types))
 
-        # Use ILIKE as a fast filter for candidate memories, but keep a broader fallback.
+        # Retrieve broader set of candidate memories
         memories = []
         if query and query.strip():
             search_pattern = f"%{query}%"
@@ -754,36 +957,93 @@ async def retrieve_internal_memory(
             memories = candidate_query.order_by(
                 Memory.updated_at.desc().nullslast(),
                 Memory.created_at.desc()
-            ).limit(limit * 3).all()
+            ).limit(limit * 5).all()
 
         if not memories:
             memories = db_query.order_by(
                 Memory.updated_at.desc().nullslast(),
                 Memory.created_at.desc()
-            ).limit(limit * 10).all()
+            ).limit(limit * 15).all()
 
-        results = []
+        # Topic isolation: keep only memories that belong to the current course bucket.
+        # topic=None or "" → "general" bucket (memories stored without a course).
+        # topic="Python"   → only memories tagged with topic="Python".
+        target_topic = (topic or "").strip().lower()
+        memories = [
+            m for m in memories
+            if (m.memory_metadata or {}).get("topic", "").strip().lower() == target_topic
+        ]
+
+        scored_memories = []
         for memory in memories:
             semantic_score = (
                 calculate_relevance(memory.content, query)
                 if query and query.strip()
                 else 0.5
             )
+
+            # Skip very low relevance memories
             if query and query.strip() and semantic_score <= 0.05:
                 continue
+
+            # Calculate importance score based on memory type and recency
+            type_importance = {
+                "episodic": 1.0,    # Learning experiences
+                "semantic": 1.2,    # Learned concepts
+                "procedural": 1.1,  # Methods and strategies
+                "behavioral": 0.9   # Session summaries
+            }
+
+            base_importance = type_importance.get(memory.memory_type, 0.8)
+
+            # Recency boost (newer memories are more important)
+            recency_score = 0.5
+            if memory.updated_at:
+                days_since_update = (datetime.now(timezone.utc) - memory.updated_at).days
+                recency_score = max(0.1, 1.0 - (days_since_update / 30.0))  # Decay over 30 days
+
+            # Content quality score (longer, more detailed memories are better)
+            content_length = len(memory.content) if memory.content else 0
+            quality_score = min(1.0, content_length / 500.0)  # Max at 500 chars
+
+            # Final importance score
+            importance_score = (base_importance * 0.4) + (recency_score * 0.3) + (quality_score * 0.3)
+
+            # Combined relevance score
+            combined_score = (semantic_score * 0.7) + (importance_score * 0.3)
+
+            scored_memories.append({
+                "memory": memory,
+                "semantic_score": semantic_score,
+                "importance_score": importance_score,
+                "combined_score": combined_score
+            })
+
+        # Sort by combined score (descending)
+        scored_memories.sort(key=lambda x: x["combined_score"], reverse=True)
+
+        results = []
+        for item in scored_memories[:limit]:
+            memory = item["memory"]
+
+            # Summarize long content to keep context manageable
+            content = memory.content
+            if len(content) > 300:
+                content = await summarize_interactions(content, query=query, max_tokens=100)
+
             results.append({
                 "id": memory.id,
                 "type": memory.memory_type,
-                "content": memory.content,
+                "content": content,
                 "metadata": memory.memory_metadata or {},
                 "created_at": memory.created_at.timestamp() if memory.created_at else None,
                 "updated_at": memory.updated_at.timestamp() if memory.updated_at else None,
-                "textual_score": semantic_score
+                "textual_score": item["semantic_score"],
+                "importance_score": item["importance_score"],
+                "combined_score": item["combined_score"]
             })
 
-        # Sort by semantic relevance and recency
-        results.sort(key=lambda item: (item["textual_score"], item.get("updated_at", 0)), reverse=True)
-        return results[:limit]
+        return results
 
     except Exception as e:
         print(f"Error retrieving internal memory: {str(e)}")
@@ -794,7 +1054,8 @@ async def retrieve_generated_summaries(
     user_id: str,
     query: str,
     cache_ttl_hours: int = 24,
-    limit: int = 5
+    limit: int = 5,
+    topic: Optional[str] = None,
 ) -> List[Dict]:
     """
     Retrieve generated summaries from cache
@@ -806,38 +1067,52 @@ async def retrieve_generated_summaries(
         cache_dir = Path("backend/data/cache/summaries")
         cache_dir.mkdir(parents=True, exist_ok=True)
         
-        summaries = []
+        candidates = []
         current_time = datetime.now(timezone.utc)
-        
-        # Scan cache directory
+
+        # Scan cache directory — files are named {user_id}_{chat_id}_{ts}.json
+        # Read a wider pool (limit × 4) so relevance-based re-ranking has enough
+        # candidates, without reading every historical file for heavy users.
         if cache_dir.exists():
-            for cache_file in sorted(cache_dir.glob("*.json"))[:limit]:
+            user_files = sorted(
+                cache_dir.glob(f"{user_id}_*.json"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )[:limit * 4]
+
+            for cache_file in user_files:
                 try:
                     with open(cache_file, 'r', encoding='utf-8') as f:
                         cached_summary = json.load(f)
-                    
+
                     # Check TTL
                     created_timestamp = cached_summary.get("created_at", 0)
                     created_date = datetime.fromtimestamp(created_timestamp, tz=timezone.utc)
-                    age = (current_time - created_date).total_seconds() / 3600  # hours
-                    
+                    age = (current_time - created_date).total_seconds() / 3600
+
                     if age <= cache_ttl_hours:
-                        # Calculate relevance to query
+                        # Topic isolation — same bucket logic as retrieve_internal_memory
+                        file_topic = cached_summary.get("topic", "").strip().lower()
+                        target_topic = (topic or "").strip().lower()
+                        if file_topic != target_topic:
+                            continue
+
                         relevance = calculate_relevance(cached_summary.get("text", ""), query)
-                        
-                        if relevance > 0.1:  # Only include if somewhat relevant
-                            summaries.append({
+                        if relevance > 0.1:
+                            candidates.append({
                                 "id": cached_summary.get("id", cache_file.stem),
                                 "text": cached_summary.get("text", ""),
                                 "source_conversation": cached_summary.get("source_conversation"),
                                 "created_at": created_timestamp,
-                                "summary_score": relevance
+                                "summary_score": relevance,
                             })
-                
+
                 except (json.JSONDecodeError, IOError):
                     continue
-        
-        return summaries
+
+        # Return the most relevant summaries, not just the most recent ones
+        candidates.sort(key=lambda x: x["summary_score"], reverse=True)
+        return candidates[:limit]
         
     except Exception as e:
         print(f"Error retrieving generated summaries: {str(e)}")
@@ -864,19 +1139,24 @@ def normalize_context(
         if len(content) > 5000:
             content = content[:5000] + "..."
         
+        doc_meta = doc.get("metadata", {})
         normalized.append(NormalizedContextItem(
             source_type="pedagogical",
             id=doc.get("id", ""),
             content=content,
             metadata={
-                "type": "document",
-                "title": doc.get("title", ""),
-                "created_at": doc.get("created_at"),
-                "source_id": doc.get("id", "")
+                "type": doc_meta.get("type", "document"),
+                "title": doc_meta.get("title", doc.get("id", "")),
+                "created_at": doc_meta.get("created_at"),
+                "last_updated": doc_meta.get("last_updated"),
+                "source_id": doc.get("id", ""),
+                "source": doc_meta.get("source", ""),
+                "interaction_count": doc_meta.get("interaction_count", 0),
+                "answered_questions": doc_meta.get("answered_questions", 0)
             },
             raw_score=doc.get("vector_score", 0.0)
         ))
-    
+
     # Normalize memories
     for memory in memories:
         content = memory.get("content", "")
@@ -995,14 +1275,37 @@ def calculate_engagement_score(item_type: str, metadata: Dict) -> float:
     # Episodic memories get higher engagement
     if item_type == "memory" and metadata.get("type") == "episodic":
         score += 0.3
-    
+
+    # Summaries — baseline engagement (content was relevant enough to be summarised)
+    if item_type == "summary":
+        score += 0.2
+
+    # Pedagogical documents should have a baseline engagement
+    # because learners are interacting with them or answering questions.
+    if item_type == "pedagogical":
+        score += 0.2
+
+        # Boost if we know the content was uploaded or indexed by the learner
+        if metadata.get("type") in {"uploaded_document", "local_document", "document"}:
+            score += 0.1
+
     # Recently updated items get bonus
     if metadata.get("last_updated"):
         score += 0.2
-    
-    # Frequently accessed items (would need tracking)
-    # score += 0.15 if accessed_recently else 0
-    
+
+    # Support explicit interaction metadata if available
+    try:
+        answered = float(metadata.get("answered_questions", 0))
+        score += min(answered * 0.05, 0.3)
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        interactions = float(metadata.get("interaction_count", 0))
+        score += min(interactions * 0.03, 0.3)
+    except (TypeError, ValueError):
+        pass
+
     return min(score, 1.0)
 
 
@@ -1012,12 +1315,12 @@ def calculate_user_alignment(
     content: str
 ) -> float:
     """
-    Calculate alignment score with user interests and learning objectives.
+    Calculate user preference alignment score based on subject domain and learning objectives.
     """
     user_interests = [str(item).lower() for item in user_profile.get("interests", []) if item]
     learning_objectives = [str(item).lower() for item in user_profile.get("learning_objectives", []) if item]
     subject = str(subject_domain or "").lower()
-    text = content.lower()
+    text = str(content or "").lower()
 
     if subject and subject in user_interests:
         return 1.0
@@ -1197,7 +1500,7 @@ def remove_duplicates(items: List[Dict], similarity_threshold: float = 0.95) -> 
 
 def rank_context(
     filtered_items: List[Dict],
-    weights: Dict[str, float] = None,
+    weights: Optional[Dict[str, float]] = None,
     diversity_strategy: bool = True,
     max_results: int = 20
 ) -> List[Dict]:
@@ -1296,7 +1599,10 @@ def format_ranked_output(ranked_items: List[Dict]) -> List[Dict]:
                 "last_updated": item.get("metadata", {}).get("last_updated"),
                 "source_id": item.get("id"),
                 "title": item.get("metadata", {}).get("title"),
-                "subject_domain": item.get("subject_domain", "general")
+                "subject_domain": item.get("subject_domain", "general"),
+                "source": item.get("metadata", {}).get("source", ""),
+                "interaction_count": item.get("metadata", {}).get("interaction_count", 0),
+                "answered_questions": item.get("metadata", {}).get("answered_questions", 0)
             },
             "scores": {
                 "relevance": round(item.get("relevance_score", 0), 3),
@@ -1319,7 +1625,6 @@ def format_ranked_output(ranked_items: List[Dict]) -> List[Dict]:
 async def retrieve_context(
     request: ContextRetrievalRequest,
     user=Depends(get_verified_user),
-    db=Depends(get_db),
 ):
     """
     Retrieve relevant context from multiple sources:
@@ -1335,6 +1640,7 @@ async def retrieve_context(
     - memory_types: Filter by memory types (optional)
     - pedagogical_level: User pedagogical level (default: intermediate)
     """
+    db = get_db_session()
     try:
         # Build user profile
         user_profile = {
@@ -1353,11 +1659,12 @@ async def retrieve_context(
             request.query,
             memory_types=request.memory_types,
             limit=10,
-            db=db
+            db=db,
+            topic=request.topic,
         )
-        
+
         summaries = await retrieve_generated_summaries(
-            user.id, request.query, limit=5
+            user.id, request.query, limit=5, topic=request.topic,
         )
         
         # Generate lightweight summaries when cache is empty
@@ -1368,7 +1675,7 @@ async def retrieve_context(
                 if content:
                     summaries.append({
                         "id": f"generated-{item.get('id', 'unknown')}",
-                        "text": summarize_interactions(content, max_tokens=300),
+                        "text": await summarize_interactions(content, query=request.query, max_tokens=300),
                         "source_conversation": item.get("id", ""),
                         "created_at": datetime.now(timezone.utc).timestamp(),
                         "summary_score": calculate_relevance(content, request.query)
@@ -1419,7 +1726,7 @@ async def retrieve_context(
         # STEP 6: Apply summarization layer
         summarization_config = CONTEXT_RETRIEVAL_CONFIG.get("summarization", {}).copy()
         summarization_config["sliding_window_size"] = request.max_results
-        summarized = apply_summarization_layer(ranked, request.query, {"summarization": summarization_config})
+        summarized = await apply_summarization_layer(ranked, request.query, {"summarization": summarization_config})
         
         # Format output
         result = format_ranked_output(summarized)
@@ -1429,16 +1736,18 @@ async def retrieve_context(
     except Exception as exc:
         print(f"Error in context retrieval: {str(exc)}")
         raise HTTPException(status_code=500, detail=f"Context retrieval failed: {str(exc)}")
+    finally:
+        db.close()
 
 
 @router.get("/context/stats")
 async def get_context_stats(
     user=Depends(get_verified_user),
-    db=Depends(get_db),
 ):
     """
     Get statistics about available context sources for the user
     """
+    db = get_db_session()
     try:
         # Count memories by type
         memory_query = db.query(Memory).filter(Memory.user_id == user.id)
@@ -1448,17 +1757,29 @@ async def get_context_stats(
         for memory_type in ["episodic", "semantic", "procedural", "behavioral"]:
             count = memory_query.filter(Memory.memory_type == memory_type).count()
             memory_types_count[memory_type] = count
-        
+
+        behavioral_count = memory_types_count.get("behavioral", 0)
+        pedagogical_document_count = 0
+        try:
+            collection = get_or_create_collection(DOCUMENTS_COLLECTION)
+            pedagogical_document_count = collection.count()
+        except Exception:
+            pedagogical_document_count = 0
+
         return {
             "user_id": user.id,
             "total_memories": total_memories,
             "memory_types": memory_types_count,
-            "available_sources": ["memory"],
-            "note": "Pedagogical documents and summaries support coming soon"
+            "behavioral_memories": behavioral_count,
+            "pedagogical_document_count": pedagogical_document_count,
+            "available_sources": ["memory", "pedagogical"],
+            "note": "Context stats now include internal memories, behavioral interaction memories, and indexed pedagogical documents."
         }
         
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        db.close()
 
 @router.post("/context/index-local-documents")
 async def index_local_documents_endpoint(
@@ -1481,6 +1802,137 @@ async def index_local_documents_endpoint(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to index documents: {str(e)}")
+
+
+def _get_document_metadata(doc_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve raw document metadata from ChromaDB by document id."""
+    try:
+        from chromadb.api.types import Include
+        collection = get_or_create_collection(DOCUMENTS_COLLECTION)
+        result = collection.get(ids=[doc_id], include=cast(Include, ["metadatas"]))
+        if not result or not result.get("ids"):
+            return None
+        metadatas = result.get("metadatas", [])
+        if metadatas:
+            # Convert Metadata object to dict if needed
+            metadata = metadatas[0]
+            if hasattr(metadata, '__dict__'):
+                return dict(metadata)
+            elif isinstance(metadata, dict):
+                return metadata
+            else:
+                return None
+        return None
+    except Exception:
+        return None
+
+
+def _update_document_metadata(doc_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Update document metadata in ChromaDB for a given document id."""
+    try:
+        collection = get_or_create_collection(DOCUMENTS_COLLECTION)
+        existing_metadata = _get_document_metadata(doc_id) or {}
+        merged_metadata = {**existing_metadata, **updates}
+        collection.update(ids=[doc_id], metadatas=[merged_metadata])
+        return merged_metadata
+    except Exception:
+        return None
+
+
+def _find_behavioral_memory_for_doc(user_id: str, doc_id: str):
+    """Find an existing behavioral memory for the same user and document."""
+    db = get_db_session()
+    try:
+        memories = db.query(Memory).filter(
+            Memory.user_id == user_id,
+            Memory.memory_type == "behavioral"
+        ).all()
+        for memory in memories:
+            metadata = memory.memory_metadata or {}
+            if metadata.get("document_id") == doc_id:
+                return memory
+        return None
+    except Exception:
+        return None
+    finally:
+        db.close()
+
+
+@router.post("/context/documents/{doc_id}/interaction")
+async def record_document_interaction(
+    doc_id: str,
+    request: DocumentInteractionRequest,
+    user=Depends(get_verified_user)
+):
+    """Record a user interaction with a pedagogical document and update engagement metadata."""
+    existing_metadata = _get_document_metadata(doc_id)
+    if existing_metadata is None:
+        raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found in vector DB")
+
+    interaction_count = int(existing_metadata.get("interaction_count", 0))
+    answered_questions = int(existing_metadata.get("answered_questions", 0))
+
+    interaction_count += request.interaction_increment
+    answered_questions += request.answered_questions_increment or 0
+
+    update_fields = {
+        "interaction_count": interaction_count,
+        "answered_questions": answered_questions,
+        "last_updated": request.last_updated or datetime.now(timezone.utc).timestamp(),
+    }
+    if request.interaction_type:
+        update_fields["last_interaction_type"] = request.interaction_type
+
+    updated_metadata = _update_document_metadata(doc_id, update_fields)
+    if updated_metadata is None:
+        raise HTTPException(status_code=500, detail="Failed to update document interaction metadata")
+
+    # Persist or update a behavioral memory for this document interaction.
+    db = get_db_session()
+    try:
+        memory = _find_behavioral_memory_for_doc(user.id, doc_id)
+        memory_metadata = {
+            "document_id": doc_id,
+            "interaction_type": request.interaction_type,
+            "interaction_count": interaction_count,
+            "answered_questions": answered_questions,
+            "last_updated": updated_metadata.get("last_updated")
+        }
+
+        if memory is not None:
+            setattr(memory, 'content', 
+                f"Interaction with document {doc_id}: {request.interaction_type or 'interaction'}"
+            )
+            setattr(memory, 'memory_metadata', memory_metadata)
+            db.add(memory)
+        else:
+            memory = Memory(
+                id=uuid4().hex,
+                user_id=user.id,
+                memory_type="behavioral",
+                content=(
+                    f"Interaction with document {doc_id}: {request.interaction_type or 'interaction'}"
+                ),
+                memory_metadata=memory_metadata,
+            )
+            db.add(memory)
+
+        db.commit()
+        db.refresh(memory)
+    except Exception as exc:
+        db.rollback()
+        print(f"Failed to persist interaction memory for doc {doc_id}: {exc}")
+    finally:
+        db.close()
+
+    return {
+        "status": "success",
+        "doc_id": doc_id,
+        "interaction_count": interaction_count,
+        "answered_questions": answered_questions,
+        "last_updated": updated_metadata.get("last_updated")
+    }
+
 
 @router.delete("/context/reset-vector-db")
 async def reset_vector_database(

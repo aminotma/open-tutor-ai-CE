@@ -14,6 +14,10 @@ if [[ "${RAG_WEB_LOADER_ENGINE,,}" == "playwright" ]]; then
     python -c "import nltk; nltk.download('punkt_tab')"
 fi
 
+export ANONYMIZED_TELEMETRY=False
+export SCARF_NO_ANALYTICS=true
+export DO_NOT_TRACK=true
+
 KEY_FILE=.webui_secret_key
 
 PORT="${PORT:-8080}"

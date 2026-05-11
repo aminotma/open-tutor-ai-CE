@@ -104,10 +104,12 @@
 		// Save support data to localStorage for chat linking
 		const supportData = {
 			id: support.id,
+			title: support.title ?? '',
+			learning_objective: support.learning_objective ?? '',
 			timestamp: Date.now(),
 			attempts: 0
 		};
-		
+
 		localStorage.setItem('pendingSupportData', JSON.stringify(supportData));
 		console.log('Saved support ID to localStorage:', support.id);
 		

@@ -514,6 +514,8 @@
 				// including a timestamp and attempt counter
 				const supportData = {
 					id: supportResponse.id,
+					title: supportResponse.title ?? supportTitle ?? '',
+					learning_objective: supportResponse.learning_objective ?? learningObjective ?? '',
 					timestamp: Date.now(),
 					attempts: 0
 				};

@@ -10,7 +10,7 @@ from open_webui.models.users import Users
 from open_tutorai.config import AppConfig
 from open_tutorai.models.database import init_database
 
-from open_tutorai.routers import response_feedbacks, auths, supports, memories, context_retrieval, adaptive_tutor
+from open_tutorai.routers import response_feedbacks, auths, supports, memories, context_retrieval, adaptive_tutor, chat_capture
 
 from open_tutorai.env import (
     CHANGELOG,
@@ -65,6 +65,8 @@ async def startup_db_client():
     try:
         init_database()
         print("Support database tables initialized successfully")
+
+
     except Exception as e:
         print(f"Error initializing database tables: {str(e)}")
 
@@ -84,6 +86,7 @@ app.include_router(supports.router, prefix="/api/v1", tags=["supports"])
 app.include_router(memories.router, prefix="/api/v1", tags=["memories"])
 app.include_router(context_retrieval.router, prefix="/api/v1", tags=["context"])
 app.include_router(adaptive_tutor.router, prefix="/api/v1", tags=["adaptive"])
+app.include_router(chat_capture.router, prefix="/api/v1", tags=["chat-capture"])
 
 
 @app.get("/api/changelog")

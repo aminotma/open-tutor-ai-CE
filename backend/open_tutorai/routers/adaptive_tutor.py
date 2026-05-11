@@ -259,13 +259,11 @@ async def verify_adaptive_output(
 async def create_adaptive_plan(
     request: AdaptiveTutorRequest,
     user=Depends(get_verified_user),
-    db=Depends(get_db),
 ):
     try:
         agent = AdaptiveTutorAgent(
             user_id=user.id,
             request_data=request.dict(),
-            db=db,
         )
         state = await agent.run()
 

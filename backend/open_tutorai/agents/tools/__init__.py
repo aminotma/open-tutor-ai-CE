@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
+from open_webui.internal.db import get_db
 
 from open_tutorai.agents import state_registry as registry
 from open_tutorai.agents.helpers import (
@@ -43,6 +45,157 @@ def _run_async(coro):
         return asyncio.run(coro)
 
 
+# ─── Deduplication helper ────────────────────────────────────────────────────
+
+def _is_duplicate_memory(
+    db,
+    user_id: str,
+    memory_type: str,
+    content: str,
+    key: str = None,
+    window_hours: int = 24,
+    similarity_threshold: float = 0.85,
+    topic: str = None,
+) -> bool:
+    """
+    Return True if a sufficiently similar memory already exists within the time window.
+
+    Checks (short-circuit on first match):
+    1. Topic isolation — only compare against memories in the same course bucket.
+    2. Key match  — for semantic (concept) and procedural (method): case-insensitive equality.
+    3. Content similarity — SequenceMatcher ratio >= threshold.
+    """
+    from open_tutorai.models.database import Memory
+
+    cutoff = datetime.utcnow() - timedelta(hours=window_hours)
+    candidates = (
+        db.query(Memory)
+        .filter(
+            Memory.user_id == user_id,
+            Memory.memory_type == memory_type,
+            Memory.created_at >= cutoff,
+        )
+        .all()
+    )
+
+    # Scope dedup to the same topic bucket
+    target_topic = (topic or "").strip().lower()
+    existing = [
+        m for m in candidates
+        if (m.memory_metadata or {}).get("topic", "").strip().lower() == target_topic
+    ]
+
+    for mem in existing:
+        # Fast path: key-based match for semantic / procedural
+        if key and mem.memory_metadata:
+            meta_key = mem.memory_metadata.get("concept") or mem.memory_metadata.get("method")
+            if meta_key and meta_key.strip().lower() == key.strip().lower():
+                return True
+
+        # Content similarity
+        ratio = difflib.SequenceMatcher(None, content, mem.content).ratio()
+        if ratio >= similarity_threshold:
+            return True
+
+    return False
+
+
+# ─── Memory creation helpers ─────────────────────────────────────────────────
+
+def _create_episodic_memory(db, user_id: str, content: str, metadata: dict = None):
+    """Create an episodic memory, skipping insertion if a similar one exists within 24 h."""
+    from open_tutorai.models.database import Memory
+
+    if _is_duplicate_memory(db, user_id, "episodic", content,
+                            topic=(metadata or {}).get("topic")):
+        return None
+
+    memory = Memory(
+        id=uuid4().hex,
+        user_id=user_id,
+        memory_type="episodic",
+        content=content,
+        memory_metadata={
+            "interaction_type": "tutor_exchange",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            **(metadata or {})
+        },
+    )
+    db.add(memory)
+    return memory
+
+
+def _create_semantic_memory(db, user_id: str, concept: str, explanation: str, metadata: dict = None):
+    """Create a semantic memory, skipping insertion if the same concept exists within 24 h."""
+    from open_tutorai.models.database import Memory
+
+    content = f"Concept appris : {concept} - {explanation}"
+    if _is_duplicate_memory(db, user_id, "semantic", content, key=concept,
+                            topic=(metadata or {}).get("topic")):
+        return None
+
+    memory = Memory(
+        id=uuid4().hex,
+        user_id=user_id,
+        memory_type="semantic",
+        content=content,
+        memory_metadata={
+            "concept": concept,
+            "learning_type": "concept_acquisition",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            **(metadata or {})
+        },
+    )
+    db.add(memory)
+    return memory
+
+
+def _create_procedural_memory(db, user_id: str, method: str, steps: list, metadata: dict = None):
+    """Create a procedural memory, skipping insertion if the same method exists within 24 h."""
+    from open_tutorai.models.database import Memory
+
+    steps_text = "\n".join(f"{i+1}. {step}" for i, step in enumerate(steps))
+    content = f"Méthode apprise : {method}\nÉtapes :\n{steps_text}"
+    if _is_duplicate_memory(db, user_id, "procedural", content, key=method,
+                            topic=(metadata or {}).get("topic")):
+        return None
+
+    memory = Memory(
+        id=uuid4().hex,
+        user_id=user_id,
+        memory_type="procedural",
+        content=content,
+        memory_metadata={
+            "method": method,
+            "steps_count": len(steps),
+            "learning_type": "method_acquisition",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            **(metadata or {})
+        },
+    )
+    db.add(memory)
+    return memory
+
+
+def _create_behavioral_memory(db, user_id: str, content: str, metadata: dict = None):
+    """Create a behavioral memory, skipping insertion if the same exchange exists within 24 h."""
+    from open_tutorai.models.database import Memory
+
+    if _is_duplicate_memory(db, user_id, "behavioral", content, similarity_threshold=1.0,
+                            topic=(metadata or {}).get("topic")):
+        return None
+
+    memory = Memory(
+        id=uuid4().hex,
+        user_id=user_id,
+        memory_type="behavioral",
+        content=content,
+        memory_metadata=metadata or {},
+    )
+    db.add(memory)
+    return memory
+
+
 # ─── Tool: retrieve memory ────────────────────────────────────────────────────
 
 @tool
@@ -65,7 +218,6 @@ def tool_retrieve_memory(
     run_id = _run_id(config)
     state = registry.get_state(run_id)
     user_id = registry.get_user_id(run_id)
-    db = registry.get_db(run_id)
 
     from open_tutorai.routers.context_retrieval import retrieve_internal_memory
     from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG
@@ -73,9 +225,10 @@ def tool_retrieve_memory(
     search_query = query or f"{state.topic} {' '.join(state.learning_objectives[:2])}"
     types = memory_types or CONTEXT_RETRIEVAL_CONFIG["memory"]["memory_types"]
 
-    memories = _run_async(
-        retrieve_internal_memory(user_id, search_query, memory_types=types, limit=limit, db=db)
-    )
+    with get_db() as db:
+        memories = _run_async(
+            retrieve_internal_memory(user_id, search_query, memory_types=types, limit=limit, db=db)
+        )
 
     new_state = (
         state
@@ -521,7 +674,7 @@ def tool_reflect(
         f"Réflexion terminée.\n"
         f"Ajustements : {len(adjustments)}\n"
         f"Résumé pour mémoire : {memory_summary}\n"
-        f"→ Passer ce résumé à tool_persist_memory."
+        f"→ Appeler tool_persist_memory avec tous les types de mémoires."
     )
 
 
@@ -530,54 +683,100 @@ def tool_reflect(
 @tool
 def tool_persist_memory(
     summary: str,
+    memory_types: Optional[List[str]] = None,
     config: RunnableConfig = None,
 ) -> str:
     """
-    Persist an important observation into the learner's behavioural memory.
+    Persist different types of memories from the tutoring session.
 
     Args:
-        summary: Structured summary to record (level, difficulties, decisions)
+        summary: Structured summary to record
+        memory_types: Types of memories to create ['episodic','semantic','procedural','behavioral']
 
     Call before tool_final_answer to ensure session continuity across sessions.
+    Creates multiple memory types based on the session content.
     """
     run_id = _run_id(config)
     state = registry.get_state(run_id)
     user_id = registry.get_user_id(run_id)
-    db = registry.get_db(run_id)
 
-    if not db:
-        return "Erreur : DB non disponible, mémoire non persistée."
-
-    from open_tutorai.models.database import Memory
-
-    memory = Memory(
-        id=uuid4().hex,
-        user_id=user_id,
-        memory_type="behavioral",
-        content=summary,
-        memory_metadata={
-            "topic": state.topic,
-            "agent_step": "react_persist",
-            "verification_verdict": (state.verification or {}).get("verdict"),
-            "adjusted_level": state.adjusted_level,
-            "tools_called": state.tools_called[-5:],
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        },
-    )
+    types_to_create = memory_types or ["behavioral", "episodic", "semantic", "procedural"]
+    created_memories = []
 
     try:
-        db.add(memory)
-        db.commit()
-        db.refresh(memory)
+        with get_db() as db:
+            # Always create behavioral memory for session summary
+            if "behavioral" in types_to_create:
+                db.add(Memory(
+                    id=uuid4().hex,
+                    user_id=user_id,
+                    memory_type="behavioral",
+                    content=summary,
+                    memory_metadata={
+                        "topic": state.topic,
+                        "agent_step": "react_persist",
+                        "verification_verdict": (state.verification or {}).get("verdict"),
+                        "adjusted_level": state.adjusted_level,
+                        "tools_called": state.tools_called[-5:],
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                ))
+                created_memories.append("behavioral")
+
+            # Create episodic memory for the learning interaction
+            if "episodic" in types_to_create:
+                _create_episodic_memory(
+                    db, user_id,
+                    (
+                        f"Session d'apprentissage sur '{state.topic}' - "
+                        f"Niveau: {state.adjusted_level}, "
+                        f"Objectifs: {', '.join(state.learning_objectives[:2])}, "
+                        f"Difficultés identifiées: {', '.join(state.difficulties[:2])}"
+                    ),
+                    {"topic": state.topic, "session_type": "adaptive_tutoring"},
+                )
+                created_memories.append("episodic")
+
+            # Create semantic memories for learned concepts
+            if "semantic" in types_to_create and state.learning_objectives:
+                for objective in state.learning_objectives[:3]:
+                    _create_semantic_memory(
+                        db, user_id, objective,
+                        (
+                            f"Concept travaillé : {objective} dans le contexte de {state.topic}. "
+                            f"Niveau de maîtrise estimé : {state.adjusted_level}"
+                        ),
+                        {"topic": state.topic, "mastery_level": state.adjusted_level},
+                    )
+                created_memories.append("semantic")
+
+            # Create procedural memory for learning strategies
+            if "procedural" in types_to_create and state.strategy:
+                _create_procedural_memory(
+                    db, user_id,
+                    f"Stratégie d'apprentissage pour {state.topic}",
+                    [
+                        f"Évaluation du niveau : {state.adjusted_level}",
+                        f"Identification des difficultés : {', '.join(state.difficulties[:2])}",
+                        f"Application des stratégies : {', '.join(state.strategy[:3])}",
+                        f"Vérification : {(state.verification or {}).get('verdict', 'non vérifié')}",
+                    ],
+                    {"topic": state.topic, "strategy_count": len(state.strategy)},
+                )
+                created_memories.append("procedural")
+
+            db.commit()
+
         new_state = (
             state
             .mark_tool_called("tool_persist_memory")
-            .append_trace("[tool_persist_memory] mémoire comportementale persistée")
+            .append_trace(f"[tool_persist_memory] mémoires créées: {', '.join(created_memories)}")
         )
         registry.update_state(run_id, new_state)
-        return f"Mémoire persistée (id={memory.id[:8]}...)"
+
+        return f"Mémoires persistées ({len(created_memories)} types): {', '.join(created_memories)}"
+
     except Exception as exc:
-        db.rollback()
         return f"Échec de persistance : {exc}"
 
 

@@ -5,12 +5,19 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from open_webui.internal.db import JSONField, get_db
+from open_webui.internal.db import JSONField, get_db, engine
 from open_webui.utils.auth import get_verified_user
 from open_webui.models.users import Users
 from open_tutorai.models.database import Memory
+from sqlalchemy.orm import sessionmaker
 
 router = APIRouter(tags=["memories"])
+
+
+def get_db_session():
+    """Get a database session using the same engine as OpenWebUI"""
+    Session = sessionmaker(bind=engine)
+    return Session()
 
 
 class MemoryType(str, Enum):
@@ -65,8 +72,8 @@ def serialize_memory(memory: Memory) -> dict:
 async def get_memories(
     memory_type: Optional[MemoryType] = Query(None, alias="memory_type"),
     user=Depends(get_verified_user),
-    db=Depends(get_db),
 ):
+    db = get_db_session()
     try:
         query = db.query(Memory).filter(Memory.user_id == user.id)
         if memory_type is not None:
@@ -75,14 +82,16 @@ async def get_memories(
         return [serialize_memory(memory) for memory in memories]
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        db.close()
 
 
 @router.post("/memories/add", response_model=MemoryResponse)
 async def add_memory(
     form_data: MemoryForm,
     user=Depends(get_verified_user),
-    db=Depends(get_db),
 ):
+    db = get_db_session()
     try:
         memory = Memory(
             id=uuid4().hex,
@@ -98,14 +107,16 @@ async def add_memory(
     except Exception as exc:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        db.close()
 
 
 @router.post("/memories/query", response_model=List[MemoryResponse])
 async def query_memory(
     query_data: MemoryQueryForm,
     user=Depends(get_verified_user),
-    db=Depends(get_db),
 ):
+    db = get_db_session()
     try:
         query = db.query(Memory).filter(Memory.user_id == user.id)
         if query_data.memory_type is not None:
@@ -115,6 +126,8 @@ async def query_memory(
         return [serialize_memory(memory) for memory in memories]
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        db.close()
 
 
 @router.post("/memories/{memory_id}/update", response_model=MemoryResponse)
@@ -122,8 +135,8 @@ async def update_memory(
     memory_id: str,
     update_data: MemoryUpdateForm,
     user=Depends(get_verified_user),
-    db=Depends(get_db),
 ):
+    db = get_db_session()
     try:
         memory = db.query(Memory).filter(Memory.id == memory_id, Memory.user_id == user.id).first()
         if not memory:
@@ -145,14 +158,16 @@ async def update_memory(
     except Exception as exc:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        db.close()
 
 
 @router.delete("/memories/{memory_id}")
 async def delete_memory(
     memory_id: str,
     user=Depends(get_verified_user),
-    db=Depends(get_db),
 ):
+    db = get_db_session()
     try:
         memory = db.query(Memory).filter(Memory.id == memory_id, Memory.user_id == user.id).first()
         if not memory:
@@ -164,13 +179,15 @@ async def delete_memory(
     except Exception as exc:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        db.close()
 
 
 @router.delete("/memories/delete/user")
 async def delete_memories_by_user(
     user=Depends(get_verified_user),
-    db=Depends(get_db),
 ):
+    db = get_db_session()
     try:
         db.query(Memory).filter(Memory.user_id == user.id).delete(synchronize_session=False)
         db.commit()
@@ -178,3 +195,5 @@ async def delete_memories_by_user(
     except Exception as exc:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        db.close()
