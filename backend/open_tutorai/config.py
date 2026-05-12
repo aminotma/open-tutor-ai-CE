@@ -117,7 +117,7 @@ CONTEXT_RETRIEVAL_CONFIG = {
     # LangChain Configuration (pour la partie LLM et embeddings)
     "langchain": {
         "enabled": True,
-        "llm_model": "gpt-4o-mini",          # Modèle OpenAI utilisé
+        "llm_model": "gpt-4.1",               # Modèle OpenAI utilisé
         "llm_temperature": 0.2,               # Faible pour des réponses stables
         "embedding_model": "all-MiniLM-L6-v2",# Même qu'avant, géré par LangChain
         "retriever_search_type": "similarity", # Type de recherche ChromaDB

@@ -42,6 +42,7 @@ class AdaptiveTutorRequest(BaseModel):
     feedback_comments: Optional[List[str]] = None
     learning_objectives: Optional[List[str]] = None
     preferred_exercise_types: Optional[List[str]] = None
+    preferred_language: Optional[str] = Field("fr", description="Language for tutor responses, e.g. 'fr', 'en', 'ar'")
     # NOTE: use_langchain removed — agent is always active
 
 

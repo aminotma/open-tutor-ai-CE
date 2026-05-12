@@ -35,6 +35,7 @@ class AdaptiveTutorState:
     user_id: str
     topic: str
     current_level: str
+    language: str = "fr"
     recent_interactions: List[Dict[str, Any]] = field(default_factory=list)
     feedback_comments: List[str] = field(default_factory=list)
     learning_objectives: List[str] = field(default_factory=list)

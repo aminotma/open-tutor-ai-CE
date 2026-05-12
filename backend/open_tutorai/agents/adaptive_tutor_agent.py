@@ -9,8 +9,8 @@ from langchain_openai import ChatOpenAI
 from open_tutorai.agents import state_registry as registry
 from open_tutorai.agents.prompts import build_system_prompt
 from open_tutorai.agents.state import AdaptiveTutorState, AgentStep
-from open_tutorai.agents.tools import ALL_TOOLS, tool_persist_memory, tool_final_answer
-from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG
+from open_tutorai.agents.tools import ALL_TOOLS, tool_persist_memory, tool_final_answer, _current_run_id
+from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG, get_openai_api_key, get_openai_base_url
 
 
 class AdaptiveTutorAgent:
@@ -34,6 +34,7 @@ class AdaptiveTutorAgent:
             user_id=user_id,
             topic=request_data.get("topic", ""),
             current_level=request_data.get("current_level", "intermediate"),
+            language=request_data.get("preferred_language", "fr"),
             recent_interactions=request_data.get("recent_interactions") or [],
             feedback_comments=request_data.get("feedback_comments") or [],
             learning_objectives=request_data.get("learning_objectives") or [],
@@ -41,11 +42,13 @@ class AdaptiveTutorAgent:
             max_iterations=self.config.get("react", {}).get("max_iterations", 10),
         )
 
-        # LLM
+        # LLM — clé et URL récupérées depuis la config admin (partagée)
         lc_cfg = self.config.get("langchain", {})
         self.llm = ChatOpenAI(
             model=lc_cfg.get("llm_model", "gpt-4o-mini"),
             temperature=lc_cfg.get("llm_temperature", 0.2),
+            api_key=get_openai_api_key(),
+            base_url=get_openai_base_url(),
         )
 
     async def run(self) -> AdaptiveTutorState:
@@ -73,16 +76,18 @@ class AdaptiveTutorAgent:
 
 {tools}
 
-Use the following format:
+Use the following format strictly:
 
-Thought: you should always think about what to do
-Action: the action to take, should be one of [{tool_names}]
-Action Input: the input to the action
+Thought: think about what to do next
+Action: one of [{tool_names}]
+Action Input: the input to the action (JSON dict or string)
 Observation: the result of the action
-... (this Thought/Action/Action Input/Observation can repeat N times)
-Thought: I now know the final answer
+... (repeat as many times as needed)
+Thought: diagnosis done and exercises generated — time to close the session
 Action: tool_final_answer
 Action Input: {{}}
+
+WARNING: never write "Final Answer: ..." — always use "Action: tool_final_answer" to finish.
 
 Begin!
 
@@ -100,7 +105,7 @@ Thought:{agent_scratchpad}"""
             max_iterations=state.max_iterations,
             handle_parsing_errors=True,
             return_intermediate_steps=True,
-            early_stopping_method=react_cfg.get("early_stopping", "generate"),
+            early_stopping_method="force",
         )
 
         # The run_id is passed through LangChain's configurable so every tool
@@ -117,6 +122,8 @@ Thought:{agent_scratchpad}"""
         state = state.append_trace("ReAct AdaptiveTutorAgent: démarrage.")
         registry.update_state(self.run_id, state)
 
+        # Définir le run_id dans le ContextVar pour que tous les outils y accèdent
+        ctx_token = _current_run_id.set(self.run_id)
         try:
             result = await executor.ainvoke(
                 {"input": input_question},
@@ -140,6 +147,7 @@ Thought:{agent_scratchpad}"""
             registry.update_state(self.run_id, state)
 
         except Exception as exc:
+            _current_run_id.reset(ctx_token)
             state = registry.get_state(self.run_id)
             state = state.append_trace(f"ReAct: erreur — {exc}")
 
@@ -161,6 +169,8 @@ Thought:{agent_scratchpad}"""
                     },
                 )
             registry.update_state(self.run_id, state)
+        else:
+            _current_run_id.reset(ctx_token)
 
         self._enforce_mandatory_tools()
 

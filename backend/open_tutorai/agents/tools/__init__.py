@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import difflib
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 
@@ -11,6 +12,9 @@ from langchain_core.runnables import RunnableConfig
 from open_webui.internal.db import get_db
 
 from open_tutorai.agents import state_registry as registry
+
+# ContextVar pour propager le run_id sans dépendre de l'injection LangChain
+_current_run_id: contextvars.ContextVar[str] = contextvars.ContextVar("run_id", default="")
 from open_tutorai.agents.helpers import (
     assess_current_level,
     detect_difficulties,
@@ -24,10 +28,28 @@ from open_tutorai.agents.helpers import (
 
 # ─── Helper to resolve run_id from LangChain config ──────────────────────────
 
-def _run_id(config: RunnableConfig) -> str:
-    run_id = (config.get("configurable") or {}).get("run_id")
+def _unpack(raw, key: str, default=None):
+    """Si LangChain passe tout le dict comme string au premier argument, on extrait la bonne clé.
+    Gère JSON valide ET repr Python (apostrophes simples)."""
+    import json as _json, ast as _ast
+    if isinstance(raw, dict):
+        return raw.get(key, default)
+    if isinstance(raw, str) and raw.strip().startswith('{'):
+        for parser in (_json.loads, _ast.literal_eval):
+            try:
+                return parser(raw.strip()).get(key, default)
+            except Exception:
+                pass
+    return raw if raw is not None else default
+
+
+def _run_id(config: RunnableConfig = None) -> str:
+    # Priorité au ContextVar (fiable même quand LangChain n'injecte pas config)
+    run_id = _current_run_id.get()
+    if not run_id and config:
+        run_id = (config.get("configurable") or {}).get("run_id")
     if not run_id:
-        raise ValueError("run_id missing from RunnableConfig — was AdaptiveTutorAgent.run() called?")
+        raise ValueError("run_id manquant — AdaptiveTutorAgent.run() a-t-il été appelé ?")
     return run_id
 
 
@@ -200,9 +222,9 @@ def _create_behavioral_memory(db, user_id: str, content: str, metadata: dict = N
 
 @tool
 def tool_retrieve_memory(
-    query: Optional[str] = None,
-    memory_types: Optional[List[str]] = None,
-    limit: int = 10,
+    query: Optional[Any] = None,
+    memory_types: Optional[Any] = None,
+    limit: Optional[Any] = 10,
     config: RunnableConfig = None,
 ) -> str:
     """
@@ -221,6 +243,10 @@ def tool_retrieve_memory(
 
     from open_tutorai.routers.context_retrieval import retrieve_internal_memory
     from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG
+
+    query = _unpack(query, "query")
+    memory_types = _unpack(memory_types, "memory_types")
+    limit = int(_unpack(limit, "limit") or 10)
 
     search_query = query or f"{state.topic} {' '.join(state.learning_objectives[:2])}"
     types = memory_types or CONTEXT_RETRIEVAL_CONFIG["memory"]["memory_types"]
@@ -252,8 +278,8 @@ def tool_retrieve_memory(
 
 @tool
 def tool_retrieve_rag(
-    query: Optional[str] = None,
-    top_k: int = 5,
+    query: Optional[Any] = None,
+    top_k: Optional[Any] = 5,
     config: RunnableConfig = None,
 ) -> str:
     """
@@ -272,6 +298,9 @@ def tool_retrieve_rag(
     user_id = registry.get_user_id(run_id)
 
     from open_tutorai.routers.context_retrieval import retrieve_pedagogical_documents
+
+    query = _unpack(query, "query")
+    top_k = int(_unpack(top_k, "top_k") or 5)
 
     search_query = query or f"{state.topic} {' '.join(state.learning_objectives[:3])}"
     top_k = min(top_k, 10)
@@ -358,6 +387,8 @@ def tool_diagnose(
     run_id = _run_id(config)
     state = registry.get_state(run_id)
 
+    force_level = _unpack(force_level, "force_level")
+
     adjusted = force_level or assess_current_level(
         state.current_level,
         state.recent_interactions,
@@ -402,7 +433,7 @@ def tool_diagnose(
 
 @tool
 def tool_plan(
-    focus_on_unsupported: bool = False,
+    focus_on_unsupported: Optional[Any] = False,
     config: RunnableConfig = None,
 ) -> str:
     """
@@ -417,6 +448,8 @@ def tool_plan(
     """
     run_id = _run_id(config)
     state = registry.get_state(run_id)
+
+    focus_on_unsupported = bool(_unpack(focus_on_unsupported, "focus_on_unsupported", False))
 
     difficulties = state.difficulties
     if focus_on_unsupported and state.verification:
@@ -453,9 +486,9 @@ def tool_plan(
 
 @tool
 def tool_generate_exercises(
-    count: int = 3,
-    override_level: Optional[str] = None,
-    target_objectives: Optional[List[str]] = None,
+    count: Optional[Any] = 3,
+    override_level: Optional[Any] = None,
+    target_objectives: Optional[Any] = None,
     config: RunnableConfig = None,
 ) -> str:
     """
@@ -471,6 +504,12 @@ def tool_generate_exercises(
     """
     run_id = _run_id(config)
     state = registry.get_state(run_id)
+
+    count = int(_unpack(count, "count") or 3)
+    override_level = _unpack(override_level, "override_level")
+    target_objectives = _unpack(target_objectives, "target_objectives")
+    if isinstance(target_objectives, str):
+        target_objectives = [target_objectives]
 
     level = override_level or state.adjusted_level
     objectives = target_objectives or state.learning_objectives

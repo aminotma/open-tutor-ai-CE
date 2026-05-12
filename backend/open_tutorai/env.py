@@ -75,8 +75,9 @@ changelog_json = {}
 
 # Iterate over each version
 for version in soup.find_all("h2"):
-    version_number = version.get_text().strip().split(" - ")[0][1:-1]  # Remove brackets
-    date = version.get_text().strip().split(" - ")[1]
+    parts = version.get_text().strip().split(" - ")
+    version_number = parts[0][1:-1]  # Remove brackets
+    date = parts[1] if len(parts) > 1 else "Unreleased"
 
     version_data = {"date": date}
 

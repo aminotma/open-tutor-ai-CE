@@ -310,10 +310,16 @@ def index_uploaded_document_to_chromadb(file_path: str, user_id: str, title: str
 
 
 def index_local_documents_to_chromadb(collection_name: str = DOCUMENTS_COLLECTION) -> int:
-    """Index local repository documents into ChromaDB."""
+    """Index pedagogical documents from the docs/ directory into ChromaDB.
+    Only the docs/ folder is searched — backend source files are never indexed."""
     repo_root = Path(__file__).resolve().parents[3]
-    search_paths = [repo_root / "docs", repo_root / "backend"]
-    supported_exts = {".md", ".txt", ".json", ".pdf"}
+    search_paths = [repo_root / "docs"]  # backend/ excluded: contains only developer docs
+    # Répertoires contenant des données utilisateur — jamais indexés
+    EXCLUDED_DIRS = {"data/cache", "data/uploads", "data/vector_db", "__pycache__", ".git", "node_modules"}
+    # Fichiers techniques non pédagogiques — jamais indexés
+    EXCLUDED_NAMES = {"requirements.txt", "requirements-dev.txt", "package.json", "package-lock.json",
+                      ".env", ".env.example", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md"}
+    supported_exts = {".md", ".txt", ".pdf"}  # JSON exclus : fichiers de session/config
     indexed_count = 0
     collection = get_or_create_collection(collection_name)
 
@@ -323,6 +329,13 @@ def index_local_documents_to_chromadb(collection_name: str = DOCUMENTS_COLLECTIO
 
         for file_path in base_path.rglob("*"):
             if not file_path.is_file() or file_path.suffix.lower() not in supported_exts:
+                continue
+
+            # Exclure tout chemin contenant un répertoire interdit ou un nom de fichier technique
+            relative = file_path.relative_to(repo_root).as_posix()
+            if any(excl in relative for excl in EXCLUDED_DIRS):
+                continue
+            if file_path.name in EXCLUDED_NAMES:
                 continue
 
             doc_id = f"local_{file_path.relative_to(repo_root).as_posix()}"
@@ -805,11 +818,21 @@ async def retrieve_pedagogical_documents(
 
         vectorstore = get_vectorstore()
 
+        # Filtre : documents appartenant à cet utilisateur
+        # OU documents sans propriétaire (ressources pédagogiques partagées)
+        doc_filter = {
+            "$or": [
+                {"user_id": {"$eq": user_id}},
+                {"user_id": {"$eq": ""}},
+            ]
+        }
+
         # Recherche sémantique via LangChain
         # Retourne List[Tuple[LangChainDocument, float]]
         results_with_scores = vectorstore.similarity_search_with_score(
             query=query,
-            k=top_k
+            k=top_k,
+            filter=doc_filter,
         )
 
         documents = []
