@@ -4,7 +4,7 @@ from __future__ import annotations
 from open_tutorai.agents.langgraph.state import TutorGraphState
 from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG
 
-MAX_ITERATIONS = 3
+MAX_ITERATIONS = 10
 
 
 def orchestrator_node(state: TutorGraphState) -> dict:
@@ -23,28 +23,54 @@ def orchestrator_node(state: TutorGraphState) -> dict:
         next_ag = _llm_route(state, next_ag)
 
     trace = trace + [f"[Orchestrator] → {next_ag} (iter={iteration})"]
-    return {"next_agent": next_ag, "agent_trace": trace}
+    return {"next_agent": next_ag, "agent_trace": trace, "iteration": iteration + 1}
 
 
 # ── Deterministic fast-path ───────────────────────────────────────────────────
 
+def _ran(trace: list, tag: str) -> bool:
+    return any(tag in t for t in trace)
+
+
+def _count(trace: list, tag: str) -> int:
+    return sum(1 for t in trace if tag in t)
+
+
+MAX_PLAN_RETRIES = 2  # max needs_review retries
+
+
 def _route(state: TutorGraphState) -> str:
-    if not state.get("memory_context"):
+    trace = state.get("agent_trace", [])
+
+    # Phase 1 — load context (each agent runs exactly once)
+    if not _ran(trace, "[MemoryAgent]"):
         return "memory"
-    if not state.get("knowledge_graph"):
+    if not _ran(trace, "[KnowledgeAgent]"):
         return "knowledge"
-    if not state.get("difficulties"):
+    if not _ran(trace, "[DiagnosticsAgent]"):
         return "diagnostics"
-    if not state.get("strategy"):
+
+    # Phase 2 — plan → exercise → verify cycle (may retry on needs_review)
+    n_plan     = _count(trace, "[PlannerAgent]")
+    n_exercise = _count(trace, "[ExerciseAgent]")
+    n_verifier = _count(trace, "[VerifierAgent]")
+
+    if n_plan == 0:
         return "planner"
-    if not state.get("exercises"):
+    if n_exercise < n_plan:
         return "exercise"
-    if not state.get("verification"):
+    if n_verifier < n_exercise:
         return "verifier"
+
+    # Retry only if verifier said needs_review and we haven't hit the retry cap
     if state.get("verification", {}).get("verdict") == "needs_review":
-        return "planner"
-    if state.get("weak_concepts") and state.get("iteration", 0) == 0:
+        if n_plan <= MAX_PLAN_RETRIES:
+            return "planner"
+
+    # Phase 3 — feedback (once, only when weak concepts remain)
+    if state.get("weak_concepts") and not _ran(trace, "[FeedbackAgent]"):
         return "feedback"
+
     return "END"
 
 

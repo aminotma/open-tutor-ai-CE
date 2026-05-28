@@ -12,14 +12,13 @@ def memory_node(state: TutorGraphState) -> dict:
     types   = CONTEXT_RETRIEVAL_CONFIG["memory"]["memory_types"]
 
     try:
-        import asyncio
         from open_webui.internal.db import get_db
-        from open_tutorai.services.context_retrieval import retrieve_internal_memory
+        from open_tutorai.services.context_retrieval import retrieve_internal_memory_sync
         from open_tutorai.services.context_manager import ContextManager
 
         with get_db() as db:
-            raw = asyncio.run(
-                retrieve_internal_memory(user_id, query, memory_types=types, limit=10, db=db)
+            raw = retrieve_internal_memory_sync(
+                user_id, query, memory_types=types, limit=10, db=db
             )
             memories = ContextManager.filter_memories(raw, topic)
     except Exception as exc:

@@ -57,9 +57,11 @@ def build_graph(use_checkpointer: bool = True):
 
     # ── Checkpointer ──────────────────────────────────────────────────────────
     if use_checkpointer:
+        import sqlite3
         Path(CHECKPOINT_DB).parent.mkdir(parents=True, exist_ok=True)
         from langgraph.checkpoint.sqlite import SqliteSaver
-        memory = SqliteSaver.from_conn_string(CHECKPOINT_DB)
+        conn = sqlite3.connect(CHECKPOINT_DB, check_same_thread=False)
+        memory = SqliteSaver(conn)
         return workflow.compile(checkpointer=memory)
 
     return workflow.compile()

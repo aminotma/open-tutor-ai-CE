@@ -130,7 +130,7 @@ def retrieve_pedagogical_documents(
 
 # ── Memory retrieval from SQL ─────────────────────────────────────────────────
 
-async def retrieve_internal_memory(
+def retrieve_internal_memory_sync(
     user_id: str,
     query: str,
     memory_types: Optional[list[str]] = None,
@@ -138,8 +138,8 @@ async def retrieve_internal_memory(
     db=None,
 ) -> list[dict]:
     """
-    Text-based retrieval from opentutorai_memory.
-    Filters by user_id, optional memory_types, and query substring.
+    Synchronous text-based retrieval from opentutorai_memory.
+    Safe to call from any context (sync or async thread).
     """
     from open_tutorai.models.database import Memory
 
@@ -162,3 +162,17 @@ async def retrieve_internal_memory(
         }
         for m in results[:limit]
     ]
+
+
+async def retrieve_internal_memory(
+    user_id: str,
+    query: str,
+    memory_types: Optional[list[str]] = None,
+    limit: int = 10,
+    db=None,
+) -> list[dict]:
+    """Async wrapper — delegates to the synchronous implementation."""
+    return retrieve_internal_memory_sync(
+        user_id=user_id, query=query,
+        memory_types=memory_types, limit=limit, db=db,
+    )

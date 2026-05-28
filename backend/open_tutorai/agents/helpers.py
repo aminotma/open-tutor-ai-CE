@@ -111,21 +111,8 @@ def extract_memory_signals(topic: str, memory_context: list[dict]) -> list[str]:
 
 # ── Exercise generation ───────────────────────────────────────────────────────
 
-def generate_exercises(
-    topic: str,
-    level: str,
-    objectives: list[str],
-    count: int = 3,
-) -> list[dict]:
-    """
-    Generate structured exercises adapted to the learner's level and objectives.
-    Returns a list of exercise dicts with: id, difficulty, question, hint, answer, skill_target.
-    """
-    count = min(max(1, count), 5)
-    level = level or "intermediate"
-    exercises = []
-
-    templates = {
+_TEMPLATES: dict[str, dict[str, list[tuple]]] = {
+    "en": {
         "beginner": [
             ("Define the concept of {obj} in your own words.",
              "Think about what {obj} means in the context of {topic}.",
@@ -150,13 +137,114 @@ def generate_exercises(
              "Consider constraints and justify your design choices.",
              "A complete design with justification of choices."),
         ],
-    }
+    },
+    "fr": {
+        "beginner": [
+            ("Définissez le concept de {obj} avec vos propres mots.",
+             "Pensez à ce que signifie {obj} dans le contexte de {topic}.",
+             "Une explication claire et simple de {obj} en lien avec {topic}."),
+            ("Donnez un exemple concret de {obj} dans la vie quotidienne.",
+             "Pensez à des situations du quotidien où {obj} apparaît.",
+             "Tout exemple réel valide illustrant {obj}."),
+        ],
+        "intermediate": [
+            ("Expliquez le fonctionnement de {obj} dans {topic} et donnez un exemple.",
+             "Décomposez le mécanisme étape par étape.",
+             "Une explication pas à pas avec un exemple concret."),
+            ("Quelles sont les principales différences entre {obj} et un concept voisin ?",
+             "Comparez les propriétés clés et les cas d'usage.",
+             "Une comparaison mettant en évidence au moins 2 différences importantes."),
+        ],
+        "advanced": [
+            ("Analysez les compromis liés à {obj} dans {topic}. Dans quel cas l'éviteriez-vous ?",
+             "Pensez à la complexité, la scalabilité et les cas limites.",
+             "Une analyse nuancée couvrant avantages, inconvénients et scénarios spécifiques."),
+            ("Concevez une solution utilisant {obj} pour le problème suivant : optimisation de {topic}.",
+             "Tenez compte des contraintes et justifiez vos choix de conception.",
+             "Une conception complète avec justification des choix."),
+        ],
+    },
+    "ar": {
+        "beginner": [
+            ("عرِّف مفهوم {obj} بكلماتك الخاصة.",
+             "فكّر في معنى {obj} في سياق {topic}.",
+             "شرح واضح وبسيط لـ {obj} في إطار {topic}."),
+            ("أعطِ مثالاً حقيقياً على {obj} من الحياة اليومية.",
+             "فكّر في مواقف يومية تظهر فيها {obj}.",
+             "أي مثال حقيقي صحيح يوضّح {obj}."),
+        ],
+        "intermediate": [
+            ("اشرح كيف يعمل {obj} في {topic} مع تقديم مثال.",
+             "حلّل الآلية خطوة بخطوة.",
+             "شرح تدريجي مع مثال ملموس."),
+            ("ما الفروق الرئيسية بين {obj} ومفهوم مشابه؟",
+             "قارن الخصائص الأساسية وحالات الاستخدام.",
+             "مقارنة تبرز فارقَين أساسيَّين على الأقل."),
+        ],
+        "advanced": [
+            ("حلّل المقايضات المرتبطة بـ {obj} في {topic}. متى ستتجنّبها؟",
+             "فكّر في التعقيد وقابلية التوسع والحالات الحدّية.",
+             "تحليل دقيق يغطي الإيجابيات والسلبيات والسيناريوهات المحددة."),
+            ("صمّم حلاً باستخدام {obj} للمشكلة التالية: تحسين {topic}.",
+             "ضع في اعتبارك القيود وبرّر خياراتك.",
+             "تصميم كامل مع تبرير الخيارات."),
+        ],
+    },
+    "es": {
+        "beginner": [
+            ("Define el concepto de {obj} con tus propias palabras.",
+             "Piensa en lo que significa {obj} en el contexto de {topic}.",
+             "Una explicación clara y sencilla de {obj} relacionada con {topic}."),
+            ("Da un ejemplo real de {obj} en la vida cotidiana.",
+             "Piensa en situaciones cotidianas donde aparece {obj}.",
+             "Cualquier ejemplo real válido que ilustre {obj}."),
+        ],
+        "intermediate": [
+            ("Explica cómo funciona {obj} en {topic} y da un ejemplo.",
+             "Desglosa el mecanismo paso a paso.",
+             "Una explicación paso a paso con un ejemplo concreto."),
+            ("¿Cuáles son las principales diferencias entre {obj} y un concepto relacionado?",
+             "Compara las propiedades clave y los casos de uso.",
+             "Una comparación que destaque al menos 2 diferencias clave."),
+        ],
+        "advanced": [
+            ("Analiza las ventajas y desventajas de usar {obj} en {topic}. ¿Cuándo lo evitarías?",
+             "Piensa en complejidad, escalabilidad y casos límite.",
+             "Un análisis detallado que cubra pros, contras y escenarios específicos."),
+            ("Diseña una solución usando {obj} para el siguiente problema: optimización de {topic}.",
+             "Considera las restricciones y justifica tus decisiones de diseño.",
+             "Un diseño completo con justificación de las elecciones."),
+        ],
+    },
+}
 
-    tpls = templates.get(level, templates["intermediate"])
+# Fallback si la langue n'est pas supportée
+_DEFAULT_LANG = "en"
+
+
+def generate_exercises(
+    topic: str,
+    level: str,
+    objectives: list[str],
+    count: int = 3,
+    language: str = "en",
+) -> list[dict]:
+    """
+    Generate structured exercises in the learner's language, adapted to level and objectives.
+    Returns a list of exercise dicts with: id, difficulty, question, hint, answer, skill_target.
+    Supported languages: en, fr, ar, es (falls back to en for others).
+    """
+    count = min(max(1, count), 5)
+    level = level or "intermediate"
+
+    lang_templates = _TEMPLATES.get(language, _TEMPLATES[_DEFAULT_LANG])
+    tpls = lang_templates.get(level, lang_templates["intermediate"])
+
     base = objectives if objectives else [topic]
     objs = [base[i % len(base)] for i in range(count)]
 
-    for i, obj in enumerate(objs[:count]):
+    exercises = []
+    for i, obj in enumerate(objs):
         tpl = tpls[i % len(tpls)]
         exercises.append({
             "id":           uuid4().hex[:8],
