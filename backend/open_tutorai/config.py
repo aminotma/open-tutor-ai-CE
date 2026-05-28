@@ -36,9 +36,10 @@ CONTEXT_RETRIEVAL_CONFIG: dict = {
         "verification_threshold": 0.65,
     },
     "summaries": {
-        "enabled":              True,
-        "cache_ttl_hours":      24,
-        "exchanges_per_summary": 5,
+        "enabled":                    True,
+        "cache_ttl_hours":            24,
+        "exchanges_per_summary":      5,
+        "auto_summarize_token_limit": 1200,  # trigger if raw exchanges exceed this token count
     },
     "summarization": {
         "enabled":             True,
