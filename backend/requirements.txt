@@ -41,8 +41,11 @@ tiktoken
 
 langchain==0.3.7
 langchain-community==0.3.7
+langgraph>=0.2.0
+langgraph-checkpoint-sqlite>=0.1.0
 
 fake-useragent==1.5.1
+networkx>=3.0
 chromadb==0.6.2
 pymilvus==2.5.0
 qdrant-client~=1.12.0
