@@ -14,15 +14,17 @@ class TutorGraphState(TypedDict):
     feedback_comments:        list
     learning_objectives:      list
     preferred_exercise_types: list
+    subject:                  str   # declared by user: 'cs'|'math'|'science'|'language'|'history'
 
     # ── Pre-loaded context (from ContextManager, before graph starts) ──────
     rag_docs:         list        # ChromaDB results
     session_summary:  str         # SummarizationService cache
 
     # ── Loaded inside the graph (mutable during session) ──────────────────
-    memory_context:   list        # MemoryAgent — episodic/behavioral/procedural
-    knowledge_graph:  dict        # KnowledgeAgent — {nodes, edges, weak_concepts}
-    weak_concepts:    list        # KnowledgeAgent — mastery < 0.4
+    memory_context:    list        # MemoryAgent — episodic/behavioral/procedural
+    knowledge_graph:   dict        # KnowledgeAgent — {nodes, edges, weak_concepts}
+    weak_concepts:     list        # KnowledgeAgent — mastery < 0.4
+    detected_subject:  str         # DiagnosticsAgent — inferred from topic+weak_concepts
 
     # ── Intermediate outputs ───────────────────────────────────────────────
     adjusted_level:     str
@@ -31,6 +33,7 @@ class TutorGraphState(TypedDict):
     strategy:           list
     strategy_decisions: list
     exercises:          list
+    tool_results:       list      # ExerciseAgent tool outputs [{tool, exercise_id, ...}]
     verification:       dict      # {verdict, support_score, supported_items, ...}
 
     # ── Control ────────────────────────────────────────────────────────────

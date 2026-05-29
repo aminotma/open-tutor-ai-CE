@@ -844,14 +844,34 @@
 			
 			systemPrompt += `.\n\n`;
 			
+			// Build localised greeting based on content_language
+			const learnerName = get(user)?.name ?? '';
+			const lang = (supportDetails.content_language || 'en').toLowerCase().slice(0, 2);
+			const hour = new Date().getHours();
+			const greetingMap: Record<string, [string, string, string]> = {
+				fr: ['Bonjour',    'Bonjour',  'Bonsoir'],
+				ar: ['صباح الخير', 'مرحباً',   'مساء الخير'],
+				es: ['Buenos días','Hola',     'Buenas noches'],
+				en: ['Good morning','Hello',   'Good evening'],
+			};
+			const [greetMorn, greetDay, greetEve] = greetingMap[lang] ?? greetingMap['en'];
+			const greeting = hour < 12 ? greetMorn : hour < 18 ? greetDay : greetEve;
+			const introMap: Record<string, string> = {
+				fr: `${greeting}${learnerName ? ' ' + learnerName : ''} ! Je suis votre tuteur pour **${supportDetails.title}**. Nous allons travailler ensemble sur : *${supportDetails.learning_objective || supportDetails.title}*.`,
+				ar: `${greeting}${learnerName ? ' ' + learnerName : ''} ! أنا مدرّسك الخاص لمادة **${supportDetails.title}**. سنعمل معاً على : *${supportDetails.learning_objective || supportDetails.title}*.`,
+				es: `${greeting}${learnerName ? ' ' + learnerName : ''} ! Soy tu tutor para **${supportDetails.title}**. Vamos a trabajar juntos en : *${supportDetails.learning_objective || supportDetails.title}*.`,
+				en: `${greeting}${learnerName ? ' ' + learnerName : ''} ! I'm your tutor for **${supportDetails.title}**. We'll be working on : *${supportDetails.learning_objective || supportDetails.title}*.`,
+			};
+			const firstMessageIntro = introMap[lang] ?? introMap['en'];
+
 			// Add directive to acknowledge context in first response
 			systemPrompt += `IMPORTANT INSTRUCTIONS: This is a learning session about ${supportDetails.title}. In your FIRST response, introduce yourself as a tutor for this specific topic and briefly mention what you'll be covering based on the learning objective. Even if the user's first message is generic (like "hello"), you should respond by acknowledging the course topic and learning goals described below.\n\n`;
-			
+
 			// Important note about not asking for information already provided - STRENGTHENED
 			systemPrompt += `CRITICAL INSTRUCTION: DO NOT ask the student about their educational level, background, prior knowledge, or learning objectives. This information has ALREADY been provided below and you must use it directly without asking the student to repeat it. Your first message should immediately begin teaching based on these details without asking any preliminary questions about the student's goals or background.\n\n`;
-			
-			// Add explicit first message format
-			systemPrompt += `Begin your first message by saying: "I'm your tutor for ${supportDetails.title}. We'll be working on ${supportDetails.learning_objective || 'this topic'} today." Then immediately start providing relevant content. Do not ask what they want to learn or what their background is.\n\n`;
+
+			// Add explicit first message format with learner name and language
+			systemPrompt += `Begin your first message with EXACTLY this sentence (do not translate or change it): "${firstMessageIntro}" — then immediately start providing relevant content. Do not ask what they want to learn or what their background is.\n\n`;
 			
 			// Add title and description
 			systemPrompt += `TOPIC: ${supportDetails.title}\n`;

@@ -116,43 +116,55 @@ def test_tutor_graph_state_importable():
 
 def test_orchestrator_routes_to_memory_when_empty():
     from open_tutorai.agents.langgraph.orchestrator import _route
-    state = {"memory_context": [], "knowledge_graph": {}, "difficulties": [],
-             "strategy": [], "exercises": [], "verification": {},
+    state = {"agent_trace": [], "memory_context": [], "knowledge_graph": {},
+             "difficulties": [], "strategy": [], "exercises": [], "verification": {},
              "weak_concepts": [], "iteration": 0, "topic": "t", "current_level": "intermediate"}
     assert _route(state) == "memory"
 
 
 def test_orchestrator_routes_to_knowledge_after_memory():
     from open_tutorai.agents.langgraph.orchestrator import _route
-    state = {"memory_context": [{"content": "x"}], "knowledge_graph": {},
+    state = {"agent_trace": ["[MemoryAgent] loaded 0 memories"],
+             "memory_context": [], "knowledge_graph": {},
              "difficulties": [], "strategy": [], "exercises": [], "verification": {},
-             "weak_concepts": [], "iteration": 0, "topic": "t", "current_level": "intermediate"}
+             "weak_concepts": [], "iteration": 1, "topic": "t", "current_level": "intermediate"}
     assert _route(state) == "knowledge"
 
 
 def test_orchestrator_routes_to_diagnostics():
     from open_tutorai.agents.langgraph.orchestrator import _route
-    state = {"memory_context": [{}], "knowledge_graph": {"nodes": []},
+    state = {"agent_trace": ["[MemoryAgent] loaded 0 memories", "[KnowledgeAgent] loaded"],
+             "memory_context": [], "knowledge_graph": {"nodes": []},
              "difficulties": [], "strategy": [], "exercises": [], "verification": {},
-             "weak_concepts": [], "iteration": 0, "topic": "t", "current_level": "intermediate"}
+             "weak_concepts": [], "iteration": 2, "topic": "t", "current_level": "intermediate"}
     assert _route(state) == "diagnostics"
 
 
 def test_orchestrator_routes_to_planner_on_needs_review():
     from open_tutorai.agents.langgraph.orchestrator import _route
-    state = {"memory_context": [{}], "knowledge_graph": {"nodes": []},
+    state = {"agent_trace": [
+                 "[MemoryAgent] loaded 0 memories", "[KnowledgeAgent] loaded",
+                 "[DiagnosticsAgent] done", "[PlannerAgent] 1 decisions",
+                 "[ExerciseAgent] 1 exercises", "[VerifierAgent] needs_review",
+             ],
+             "memory_context": [], "knowledge_graph": {"nodes": []},
              "difficulties": ["gap"], "strategy": ["s1"], "exercises": [{"id": "e1"}],
              "verification": {"verdict": "needs_review"}, "weak_concepts": [],
-             "iteration": 0, "topic": "t", "current_level": "intermediate"}
+             "iteration": 1, "topic": "t", "current_level": "intermediate"}
     assert _route(state) == "planner"
 
 
 def test_orchestrator_routes_to_end():
     from open_tutorai.agents.langgraph.orchestrator import _route
-    state = {"memory_context": [{}], "knowledge_graph": {"nodes": []},
+    state = {"agent_trace": [
+                 "[MemoryAgent] loaded 0 memories", "[KnowledgeAgent] loaded",
+                 "[DiagnosticsAgent] done", "[PlannerAgent] 1 decisions",
+                 "[ExerciseAgent] 1 exercises", "[VerifierAgent] supported",
+             ],
+             "memory_context": [], "knowledge_graph": {"nodes": []},
              "difficulties": ["gap"], "strategy": ["s1"], "exercises": [{"id": "e1"}],
              "verification": {"verdict": "supported"}, "weak_concepts": [],
-             "iteration": 1, "topic": "t", "current_level": "intermediate"}
+             "iteration": 6, "topic": "t", "current_level": "intermediate"}
     assert _route(state) == "END"
 
 

@@ -9,6 +9,7 @@ def diagnostics_node(state: TutorGraphState) -> dict:
         assess_current_level,
         detect_difficulties,
         extract_memory_signals,
+        detect_subject,
     )
 
     adjusted = assess_current_level(
@@ -34,13 +35,18 @@ def diagnostics_node(state: TutorGraphState) -> dict:
     if not difficulties:
         difficulties = [f"No critical gap detected for {state['topic']}."]
 
+    # Infer subject from topic + weak concepts (Source 2 of the cascade)
+    detected = detect_subject(state["topic"], state.get("weak_concepts", []))
+
     trace = state.get("agent_trace", []) + [
         f"[DiagnosticsAgent] level={adjusted}, {len(difficulties)} difficulties"
+        + (f", subject={detected}" if detected else "")
     ]
     return {
-        "adjusted_level": adjusted,
-        "difficulties":   difficulties,
-        "priority_focus": difficulties[:3],
-        "agent_trace":    trace,
-        "next_agent":     "planner",
+        "adjusted_level":   adjusted,
+        "difficulties":     difficulties,
+        "priority_focus":   difficulties[:3],
+        "detected_subject": detected or "",
+        "agent_trace":      trace,
+        "next_agent":       "planner",
     }

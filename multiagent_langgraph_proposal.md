@@ -97,10 +97,12 @@
 │  │                       │                                                       │              │   │
 │  │             ┌─────────▼─────────┐                                             │              │   │
 │  │             │  ExerciseAgent    │◀── rag_docs (from AgentContext)             │              │   │
-│  │             │  R procedural     │◀── search_web                              │              │   │
-│  │             │  + skills         │◀── skills / generate_chart                 │              │   │
-│  │             │  + live_code_eval │◀── live_code_evaluation                    │              │   │
-│  │             └─────────┬─────────┘                                             │              │   │
+│  │             │  R procedural     │◀── live_code_evaluation (coding)           │              │   │
+│  │             │  + tools routed   │◀── math_evaluator (math / science)         │              │   │
+│  │             │  by (type,subject)│◀── generate_chart (math/science/history)   │              │   │
+│  │             │                   │◀── grammar_checker (language)              │              │   │
+│  │             │                   │◀── search_web (all — fact-check/enrich)    │              │   │
+-│  │             └─────────┬─────────┘                                             │              │   │
 │  │                       │                                                       │              │   │
 │  │             ┌─────────▼─────────┐                                             │              │   │
 │  │             │  VerifierAgent    │◀── rag_docs (from AgentContext)             │              │   │
@@ -218,7 +220,7 @@ Gaps in the graph directly drive the `PlannerAgent`.
 | **KnowledgeAgent** | Reads/updates the knowledge graph | `get_concept_graph`, `update_mastery`, `find_prerequisites` |
 | **DiagnosticsAgent** | Assesses level, detects gaps via the graph | `retrieve_rag`, `assess_level_from_graph` |
 | **PlannerAgent** | Targeted strategy on weak graph nodes | `retrieve_rag`, `search_web` |
-| **ExerciseAgent** | Generates exercises on gap concepts | `retrieve_rag`, `search_web`, `generate_exercises` |
+| **ExerciseAgent** | Generates exercises on gap concepts; resolves subject via 3-source cascade, routes to the right tool by `(type, subject)` | `live_code_evaluation` (coding), `math_evaluator` (math/science), `generate_chart` (chart/timeline), `grammar_checker` (language), `search_web` (fact-check/enrich) |
 | **VerifierAgent** | Verifies RAG consistency of generated content | `retrieve_rag` |
 | **FeedbackAgent** | Interprets feedback, updates the graph | `update_mastery`, `persist_memory` |
 
@@ -359,7 +361,7 @@ Phase 5 ──► Phase 6
 backend/open_tutorai/agents/
 ├── langgraph/
 │   ├── __init__.py
-│   ├── state.py          ← TutorGraphState TypedDict
+│   ├── state.py          ← TutorGraphState TypedDict (+ tool_results field)
 │   ├── graph.py          ← StateGraph compiled + SqliteSaver checkpointer
 │   ├── orchestrator.py   ← OrchestratorAgent (deterministic fast-path + optional LLM)
 │   └── agents/
@@ -367,12 +369,38 @@ backend/open_tutorai/agents/
 │       ├── knowledge.py    ← KnowledgeAgent   : calls KnowledgeGraphService
 │       ├── diagnostics.py  ← DiagnosticsAgent : assess_level + detect_gaps from KG
 │       ├── planner.py      ← PlannerAgent     : strategy on weak_concepts + RAG
-│       ├── exercise.py     ← ExerciseAgent    : generate exercises targeting weak nodes
+│       ├── exercise.py     ← ExerciseAgent    : generate exercises + route to tool by (type,subject)
 │       ├── verifier.py     ← VerifierAgent    : RAG consistency check → re-plan if KO
 │       └── feedback.py     ← FeedbackAgent    : update KG mastery + persist memories
+
+backend/open_tutorai/tools/            ← Exercise Tools package (Phase 5 addition)
+├── __init__.py
+├── live_code_evaluation.py  ← coding exercises    — subprocess Python sandbox (timeout 5s)
+├── math_evaluator.py        ← math/science        — sympy symbolic eval + numeric fallback
+├── generate_chart.py        ← chart/timeline      — matplotlib PNG→base64 (line/bar/scatter/function/timeline)
+├── search_web.py            ← all subjects        — DuckDuckGo snippets for fact-check/enrich
+└── grammar_checker.py       ← language exercises  — OpenAI LLM, returns errors+corrected_text+explanation
 ```
 
-**`TutorGraphState`** extends the TypedDict in §4 with context fields from Phases 1–4: `memory_context` (MemoryAgent), `session_summary` (SummarizationLayer), `knowledge_graph` (KnowledgeAgent), `pedagogical_context` (RAG), `web_search_results`, `user_message`, `user_name`, plus output fields (`adjusted_level`, `weak_concepts`, `difficulties`, `strategy`, `exercises`, `verification`) and control fields (`next_agent`, `iteration`, `agent_trace`).
+**Exercise tool routing (in `_run_tool_for_exercise()`) :**
+
+| Exercise `type` | `subject` | Tool called | Trigger condition |
+|---|---|---|---|
+| `coding` | `cs` / any | `live_code_evaluation` | `starter_code` present |
+| `math` | `math` / `science` | `math_evaluator` | `expression` or `answer` present |
+| `chart` | any | `generate_chart` | `chart_type` + `chart_payload` present |
+| `dictation`, `writing` | `language` | `grammar_checker` | `sample_text` or `answer` present |
+| `mcq`, `explain` | any | `search_web` | `search_query` present |
+
+See [docs/exercises_tools.md](../../docs/exercises_tools.md) for full field schemas and payload examples.
+
+**`TutorGraphState`** extends the TypedDict in §4 with context fields from Phases 1–4: `memory_context` (MemoryAgent), `session_summary` (SummarizationLayer), `knowledge_graph` (KnowledgeAgent), `pedagogical_context` (RAG), `web_search_results`, `user_message`, `user_name`, plus output fields (`adjusted_level`, `weak_concepts`, `difficulties`, `strategy`, `exercises`, `tool_results`, `verification`) and control fields (`next_agent`, `iteration`, `agent_trace`).
+
+Two subject fields drive tool activation:
+- `subject` (Gateway input) — declared by the user or the frontend at session start
+- `detected_subject` (DiagnosticsAgent output) — inferred from `topic` + `weak_concepts` via `detect_subject()`
+
+ExerciseAgent resolves the active subject via a **3-source cascade**: `subject` → `detected_subject` → local `detect_subject()` heuristic. When a subject is resolved, `generate_typed_exercises()` is called instead of the generic `generate_exercises()`, producing exercises with tool-trigger fields (`starter_code`, `expression`, `chart_payload`, `sample_text`, `search_query`). `tool_results` accumulates one entry per exercise that triggered a tool call.
 
 **Orchestrator routing logic (deterministic fast-path, LLM only for ambiguous cases) :**
 ```

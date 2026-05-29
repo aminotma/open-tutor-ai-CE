@@ -258,6 +258,412 @@ def generate_exercises(
     return exercises
 
 
+# ── Subject detection ─────────────────────────────────────────────────────────
+
+# Keywords per subject — order matters: more specific first
+_SUBJECT_KEYWORDS: list[tuple[str, list[str]]] = [
+    ("cs", [
+        "algorithm", "code", "coding", "python", "javascript", "java", "sql",
+        "recursion", "function", "class", "loop", "array", "sorting", "debug",
+        "algorithme", "récursion", "boucle", "tableau", "trier", "fonction",
+        "программирование", "código",
+    ]),
+    ("math", [
+        "intégrale", "dérivée", "équation", "matrice", "vecteur", "probabilité",
+        "limite", "suite", "polynôme", "géométrie", "trigonométrie", "logarithme",
+        "integral", "derivative", "equation", "matrix", "vector", "probability",
+        "limit", "polynomial", "geometry", "trigonometry", "logarithm",
+    ]),
+    ("science", [
+        "physique", "chimie", "biologie", "énergie", "force", "vitesse",
+        "atome", "molécule", "réaction", "gravité", "électricité", "thermodynamique",
+        "physics", "chemistry", "biology", "energy", "force", "velocity",
+        "atom", "molecule", "reaction", "gravity", "electricity",
+    ]),
+    ("language", [
+        "grammaire", "conjugaison", "orthographe", "rédaction", "lecture",
+        "dictée", "traduction", "vocabulaire", "syntaxe", "phrase",
+        "grammar", "conjugation", "spelling", "writing", "reading",
+        "dictation", "translation", "vocabulary", "syntax", "sentence",
+        "النحو", "الإملاء", "gramática",
+    ]),
+    ("history", [
+        "histoire", "révolution", "guerre", "siècle", "empire", "civilisation",
+        "chronologie", "événement", "géographie", "carte", "pays", "continent",
+        "history", "revolution", "war", "century", "empire", "civilization",
+        "timeline", "event", "geography", "map", "country", "continent",
+    ]),
+]
+
+
+def detect_subject(topic: str, weak_concepts: list[str] | None = None) -> str | None:
+    """
+    Infer the academic subject from the topic and weak concepts using keyword matching.
+
+    Returns one of: 'cs', 'math', 'science', 'language', 'history', or None.
+    None means the subject is ambiguous — caller should fall back to generic exercises.
+    """
+    text = " ".join(filter(None, [topic] + (weak_concepts or []))).lower()
+    scores: dict[str, int] = {}
+    for subject, keywords in _SUBJECT_KEYWORDS:
+        hit = sum(1 for kw in keywords if kw in text)
+        if hit:
+            scores[subject] = hit
+
+    if not scores:
+        return None
+    best = max(scores, key=lambda s: scores[s])
+    # Require at least 2 keyword hits to avoid false positives on short topics
+    return best if scores[best] >= 2 else list(scores.keys())[0] if len(scores) == 1 else None
+
+
+# ── Typed exercise generation (subject-aware) ─────────────────────────────────
+
+# Starter code stubs for CS coding exercises — parameterised by level
+_CS_STUBS: dict[str, str] = {
+    "beginner": (
+        "def exercice(valeur):\n"
+        "    # {obj}\n"
+        "    return valeur\n\n"
+        "print(exercice(5))"
+    ),
+    "intermediate": (
+        "def resoudre(donnees):\n"
+        "    \"\"\"{obj}\"\"\"\n"
+        "    resultat = []\n"
+        "    for item in donnees:\n"
+        "        resultat.append(item)\n"
+        "    return resultat\n\n"
+        "print(resoudre([1, 2, 3]))"
+    ),
+    "advanced": (
+        "def optimiser(donnees, contrainte=None):\n"
+        "    \"\"\"{obj}\"\"\"\n"
+        "    pass\n\n"
+        "print(optimiser([10, 5, 3, 8], contrainte=2))"
+    ),
+}
+
+# Math expressions by level — used when no keyword hint matches
+_MATH_EXPR_BY_LEVEL: dict[str, str] = {
+    "beginner":     "2**8",
+    "intermediate": "solve(x**2 - 5*x + 6, x)",
+    "advanced":     "integrate(x**3 - 2*x, x)",
+}
+
+# Math expression hints derived from the objective/topic text
+_MATH_EXPR_HINTS: list[tuple[list[str], str]] = [
+    (["dérivée", "derivative", "diff"],      "diff(x**3 - 2*x**2 + x, x)"),
+    (["intégrale", "integral", "integrat"],  "integrate(x**2 + 1, x)"),
+    (["équation", "equation", "solve"],      "solve(x**2 - 4*x + 3, x)"),
+    (["limite", "limit", "lim"],             "limit(sin(x)/x, x, 0)"),
+    (["matrice", "matrix"],                  "Matrix([[1,2],[3,4]]).det()"),
+    (["probabilité", "probability"],         "Rational(3, 4) * Rational(1, 2)"),
+    (["factorielle", "factorial"],           "factorial(6)"),
+    (["suite", "sequence"],                  "sum(1/n**2 for n in range(1, 101))"),
+]
+
+# Sample sentences for language dictation by level
+_LANG_SAMPLES: dict[str, str] = {
+    "beginner":     "Le chat mange du poisson.",
+    "intermediate": "Les élèves ont bien travaillé pendant toute la semaine.",
+    "advanced":     "Bien que la situation fût complexe, ils parvinrent à trouver une solution élégante.",
+}
+
+# Chart payloads for history timelines and math functions
+_CHART_MATH_FUNCTION: dict[str, dict] = {
+    "beginner":     {"expr": "x**2",          "x_min": -4, "x_max": 4},
+    "intermediate": {"expr": "x**3 - 3*x",    "x_min": -3, "x_max": 3},
+    "advanced":     {"expr": "sin(x)*exp(-x/5)", "x_min": 0, "x_max": 20},
+}
+
+
+def _pick_math_expression(text: str, level: str) -> str:
+    """Return the most relevant sympy expression for a math exercise."""
+    text_lower = text.lower()
+    for keywords, expr in _MATH_EXPR_HINTS:
+        if any(kw in text_lower for kw in keywords):
+            return expr
+    return _MATH_EXPR_BY_LEVEL.get(level, _MATH_EXPR_BY_LEVEL["intermediate"])
+
+
+def generate_typed_exercises(
+    topic: str,
+    subject: str,
+    level: str,
+    objectives: list[str],
+    count: int = 3,
+    language: str = "en",
+) -> list[dict]:
+    """
+    Generate exercises enriched with tool-trigger fields based on the academic subject.
+
+    Each exercise includes `type` and `subject` so that `_run_tool_for_exercise()`
+    in ExerciseAgent can route to the correct tool automatically.
+
+    Subject → tool mapping:
+        cs       → coding  → live_code_evaluation  (starter_code)
+        math     → math    → math_evaluator        (expression)
+        science  → chart   → generate_chart        (chart_payload) at advanced
+                  math    → math_evaluator        at beginner/intermediate
+        language → dictation → grammar_checker    (sample_text)
+        history  → chart   → generate_chart        (timeline) or mcq + search_web
+    """
+    import json as _json  # noqa: PLC0415
+
+    count = min(max(1, count), 5)
+    level = level or "intermediate"
+    base_objs = objectives if objectives else [topic]
+    objs = [base_objs[i % len(base_objs)] for i in range(count)]
+    obj_text = " ".join(objs)
+
+    exercises: list[dict] = []
+
+    for i, obj in enumerate(objs):
+        ex_id = uuid4().hex[:8]
+        base = {
+            "id":          ex_id,
+            "subject":     subject,
+            "difficulty":  level,
+            "skill_target": obj,
+        }
+
+        # ── CS: coding exercise ───────────────────────────────────────────
+        if subject == "cs":
+            stub = _CS_STUBS.get(level, _CS_STUBS["intermediate"]).format(obj=obj[:60])
+            base.update({
+                "type":         "coding",
+                "question":     _localise("cs_question", language, obj=obj, topic=topic),
+                "hint":         _localise("cs_hint",     language, obj=obj, topic=topic),
+                "answer":       _localise("cs_answer",   language, obj=obj, topic=topic),
+                "starter_code": stub,
+                "code_language": "python",
+            })
+
+        # ── Math: symbolic evaluation ─────────────────────────────────────
+        elif subject == "math":
+            expr = _pick_math_expression(obj + " " + topic, level)
+            base.update({
+                "type":       "math",
+                "question":   _localise("math_question", language, obj=obj, topic=topic),
+                "hint":       _localise("math_hint",     language, obj=obj, topic=topic),
+                "answer":     expr,
+                "expression": expr,
+            })
+
+        # ── Science: formula at beginner/intermediate, chart at advanced ──
+        elif subject == "science":
+            if level == "advanced":
+                payload = _json.dumps({
+                    **_CHART_MATH_FUNCTION[level],
+                    "title": f"{topic} — {obj[:40]}",
+                    "xlabel": "x", "ylabel": "f(x)",
+                })
+                base.update({
+                    "type":          "chart",
+                    "question":      _localise("chart_question", language, obj=obj, topic=topic),
+                    "hint":          _localise("chart_hint",     language, obj=obj, topic=topic),
+                    "answer":        _localise("chart_answer",   language, obj=obj, topic=topic),
+                    "chart_type":    "function",
+                    "chart_payload": payload,
+                })
+            else:
+                expr = _pick_math_expression(obj + " " + topic, level)
+                base.update({
+                    "type":       "math",
+                    "question":   _localise("science_question", language, obj=obj, topic=topic),
+                    "hint":       _localise("science_hint",     language, obj=obj, topic=topic),
+                    "answer":     expr,
+                    "expression": expr,
+                })
+
+        # ── Language: dictation / grammar check ───────────────────────────
+        elif subject == "language":
+            sample = _LANG_SAMPLES.get(level, _LANG_SAMPLES["intermediate"])
+            lang_code = {"fr": "fr", "ar": "ar", "es": "es"}.get(language, "fr")
+            base.update({
+                "type":        "dictation",
+                "question":    _localise("lang_question", language, obj=obj, topic=topic),
+                "hint":        _localise("lang_hint",     language, obj=obj, topic=topic),
+                "answer":      sample,
+                "sample_text": sample,
+                "lang_code":   lang_code,
+            })
+
+        # ── History: timeline chart or MCQ with web search ────────────────
+        elif subject == "history":
+            if i % 2 == 0:
+                payload = _json.dumps({
+                    "events": [
+                        {"year": 1789, "label": "Révolution française"},
+                        {"year": 1815, "label": "Waterloo"},
+                        {"year": 1848, "label": "Printemps des peuples"},
+                    ],
+                    "title": f"Chronologie — {topic}",
+                })
+                base.update({
+                    "type":          "chart",
+                    "question":      _localise("history_chart_q", language, obj=obj, topic=topic),
+                    "hint":          _localise("history_chart_h", language, obj=obj, topic=topic),
+                    "answer":        _localise("history_chart_a", language, obj=obj, topic=topic),
+                    "chart_type":    "timeline",
+                    "chart_payload": payload,
+                })
+            else:
+                base.update({
+                    "type":         "mcq",
+                    "question":     _localise("history_mcq_q", language, obj=obj, topic=topic),
+                    "hint":         _localise("history_mcq_h", language, obj=obj, topic=topic),
+                    "answer":       _localise("history_mcq_a", language, obj=obj, topic=topic),
+                    "search_query": f"{obj} {topic}",
+                })
+
+        # ── Fallback (unknown subject) ────────────────────────────────────
+        else:
+            base.update({
+                "type":     "explain",
+                "question": f"Explain {obj} in the context of {topic}.",
+                "hint":     f"Think about the key properties of {obj}.",
+                "answer":   f"A clear explanation of {obj} linked to {topic}.",
+            })
+
+        exercises.append(base)
+
+    return exercises
+
+
+# ── Localised question strings for typed exercises ────────────────────────────
+
+_TYPED_STRINGS: dict[str, dict[str, str]] = {
+    "cs_question": {
+        "fr": "Complète la fonction Python pour résoudre : {obj}.",
+        "ar": "أكمل دالة Python لحلّ: {obj}.",
+        "es": "Completa la función Python para resolver: {obj}.",
+        "en": "Complete the Python function to solve: {obj}.",
+    },
+    "cs_hint": {
+        "fr": "Commence par définir le cas de base, puis le cas récursif ou itératif.",
+        "ar": "ابدأ بتعريف الحالة الأساسية ثم الحالة التكرارية.",
+        "es": "Empieza por definir el caso base, luego el caso recursivo o iterativo.",
+        "en": "Start by defining the base case, then the recursive or iterative case.",
+    },
+    "cs_answer": {
+        "fr": "Une fonction correcte qui produit le résultat attendu sans erreur.",
+        "ar": "دالة صحيحة تنتج النتيجة المتوقعة دون أخطاء.",
+        "es": "Una función correcta que produce el resultado esperado sin errores.",
+        "en": "A correct function that produces the expected result without errors.",
+    },
+    "math_question": {
+        "fr": "Calcule ou résous : {obj} (sujet : {topic}).",
+        "ar": "احسب أو حلّ: {obj} (الموضوع: {topic}).",
+        "es": "Calcula o resuelve: {obj} (tema: {topic}).",
+        "en": "Calculate or solve: {obj} (topic: {topic}).",
+    },
+    "math_hint": {
+        "fr": "Utilise les propriétés algébriques de {obj}.",
+        "ar": "استخدم الخصائص الجبرية لـ {obj}.",
+        "es": "Usa las propiedades algebraicas de {obj}.",
+        "en": "Use the algebraic properties of {obj}.",
+    },
+    "science_question": {
+        "fr": "Applique la formule liée à {obj} dans le contexte de {topic}.",
+        "ar": "طبّق الصيغة المرتبطة بـ {obj} في سياق {topic}.",
+        "es": "Aplica la fórmula relacionada con {obj} en el contexto de {topic}.",
+        "en": "Apply the formula related to {obj} in the context of {topic}.",
+    },
+    "science_hint": {
+        "fr": "Identifie les variables et les unités avant de calculer.",
+        "ar": "حدّد المتغيرات والوحدات قبل الحساب.",
+        "es": "Identifica las variables y las unidades antes de calcular.",
+        "en": "Identify the variables and units before calculating.",
+    },
+    "chart_question": {
+        "fr": "Analyse la courbe représentant {obj} dans {topic}.",
+        "ar": "حلّل المنحنى الممثِّل لـ {obj} في {topic}.",
+        "es": "Analiza la curva que representa {obj} en {topic}.",
+        "en": "Analyse the curve representing {obj} in {topic}.",
+    },
+    "chart_hint": {
+        "fr": "Observe les extremums, les zéros et le comportement aux bornes.",
+        "ar": "لاحظ النقاط القصوى والأصفار والسلوك عند الحدود.",
+        "es": "Observa los extremos, los ceros y el comportamiento en los extremos.",
+        "en": "Observe extrema, zeros, and boundary behaviour.",
+    },
+    "chart_answer": {
+        "fr": "Une description précise des caractéristiques principales de la courbe.",
+        "ar": "وصف دقيق للخصائص الرئيسية للمنحنى.",
+        "es": "Una descripción precisa de las características principales de la curva.",
+        "en": "A precise description of the main characteristics of the curve.",
+    },
+    "lang_question": {
+        "fr": "Réécris la phrase suivante en corrigeant les erreurs de {obj}.",
+        "ar": "أعِد كتابة الجملة التالية مع تصحيح أخطاء {obj}.",
+        "es": "Reescribe la siguiente frase corrigiendo los errores de {obj}.",
+        "en": "Rewrite the following sentence correcting {obj} errors.",
+    },
+    "lang_hint": {
+        "fr": "Lis la phrase à voix haute et repère les incohérences grammaticales.",
+        "ar": "اقرأ الجملة بصوت عالٍ وحدّد التناقضات النحوية.",
+        "es": "Lee la frase en voz alta e identifica las incoherencias gramaticales.",
+        "en": "Read the sentence aloud and spot grammatical inconsistencies.",
+    },
+    "history_chart_q": {
+        "fr": "Replace les événements de {topic} dans l'ordre chronologique.",
+        "ar": "رتّب أحداث {topic} بالترتيب الزمني.",
+        "es": "Ordena los eventos de {topic} cronológicamente.",
+        "en": "Place the events of {topic} in chronological order.",
+    },
+    "history_chart_h": {
+        "fr": "Utilise la timeline pour repérer les dates clés.",
+        "ar": "استخدم الجدول الزمني لتحديد التواريخ الرئيسية.",
+        "es": "Usa la línea de tiempo para identificar las fechas clave.",
+        "en": "Use the timeline to identify key dates.",
+    },
+    "history_chart_a": {
+        "fr": "Les événements correctement ordonnés avec leurs dates.",
+        "ar": "الأحداث مرتبة بشكل صحيح مع تواريخها.",
+        "es": "Los eventos correctamente ordenados con sus fechas.",
+        "en": "Events correctly ordered with their dates.",
+    },
+    "history_mcq_q": {
+        "fr": "Quelle est la cause principale de {obj} dans l'histoire de {topic} ?",
+        "ar": "ما السبب الرئيسي لـ {obj} في تاريخ {topic}؟",
+        "es": "¿Cuál es la causa principal de {obj} en la historia de {topic}?",
+        "en": "What is the main cause of {obj} in the history of {topic}?",
+    },
+    "history_mcq_h": {
+        "fr": "Pense au contexte politique et économique de l'époque.",
+        "ar": "فكّر في السياق السياسي والاقتصادي للحقبة.",
+        "es": "Piensa en el contexto político y económico de la época.",
+        "en": "Think about the political and economic context of the period.",
+    },
+    "history_mcq_a": {
+        "fr": "Une réponse précise mentionnant les facteurs historiques clés.",
+        "ar": "إجابة دقيقة تذكر العوامل التاريخية الرئيسية.",
+        "es": "Una respuesta precisa mencionando los factores históricos clave.",
+        "en": "A precise answer mentioning key historical factors.",
+    },
+    # shared math_answer / science_answer — use expression directly
+}
+
+_MATH_ANSWER_TPL = {
+    "fr": "Le résultat de l'expression sympy évaluée.",
+    "en": "The result of the evaluated sympy expression.",
+    "ar": "نتيجة التعبير الرياضي المقيَّم.",
+    "es": "El resultado de la expresión sympy evaluada.",
+}
+
+
+def _localise(key: str, language: str, **kwargs) -> str:
+    """Return a localised string for typed exercise fields."""
+    lang = language if language in ("fr", "ar", "es") else "en"
+    tpl = _TYPED_STRINGS.get(key, {}).get(lang) or _TYPED_STRINGS.get(key, {}).get("en", "")
+    try:
+        return tpl.format(**kwargs)
+    except KeyError:
+        return tpl
+
+
 # ── Strategy planning ─────────────────────────────────────────────────────────
 
 def plan_learning_strategy(
