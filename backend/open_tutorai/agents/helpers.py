@@ -370,6 +370,20 @@ _LANG_SAMPLES: dict[str, str] = {
     "advanced":     "Bien que la situation fût complexe, ils parvinrent à trouver une solution élégante.",
 }
 
+# Keywords that indicate the user wants a visual (chart) rather than a pure computation
+_VIZ_KEYWORDS: frozenset[str] = frozenset({
+    "parabole", "courbe", "graphe", "graphique", "tracer", "trace",
+    "visualis", "représent", "repres", "dessiner", "afficher",
+    "plot", "draw", "graph", "curve", "f(x)", "fonction",
+})
+
+
+def _wants_chart(text: str) -> bool:
+    """Return True if *text* contains at least one visualisation keyword."""
+    tl = text.lower()
+    return any(kw in tl for kw in _VIZ_KEYWORDS)
+
+
 # Chart payloads for history timelines and math functions
 _CHART_MATH_FUNCTION: dict[str, dict] = {
     "beginner":     {"expr": "x**2",          "x_min": -4, "x_max": 4},
@@ -440,16 +454,32 @@ def generate_typed_exercises(
                 "code_language": "python",
             })
 
-        # ── Math: symbolic evaluation ─────────────────────────────────────
+        # ── Math: chart if visualisation keywords, otherwise symbolic eval ──
         elif subject == "math":
-            expr = _pick_math_expression(obj + " " + topic, level)
-            base.update({
-                "type":       "math",
-                "question":   _localise("math_question", language, obj=obj, topic=topic),
-                "hint":       _localise("math_hint",     language, obj=obj, topic=topic),
-                "answer":     expr,
-                "expression": expr,
-            })
+            if _wants_chart(obj + " " + topic):
+                chart_data = _CHART_MATH_FUNCTION.get(level, _CHART_MATH_FUNCTION["intermediate"])
+                payload = _json.dumps({
+                    **chart_data,
+                    "title": f"{topic} — {obj[:40]}",
+                    "xlabel": "x", "ylabel": "f(x)",
+                })
+                base.update({
+                    "type":          "chart",
+                    "question":      _localise("chart_question", language, obj=obj, topic=topic),
+                    "hint":          _localise("chart_hint",     language, obj=obj, topic=topic),
+                    "answer":        _localise("chart_answer",   language, obj=obj, topic=topic),
+                    "chart_type":    "function",
+                    "chart_payload": payload,
+                })
+            else:
+                expr = _pick_math_expression(obj + " " + topic, level)
+                base.update({
+                    "type":       "math",
+                    "question":   _localise("math_question", language, obj=obj, topic=topic),
+                    "hint":       _localise("math_hint",     language, obj=obj, topic=topic),
+                    "answer":     expr,
+                    "expression": expr,
+                })
 
         # ── Science: formula at beginner/intermediate, chart at advanced ──
         elif subject == "science":

@@ -72,6 +72,12 @@ async def startup_db_client():
     except Exception as e:
         print(f"Error initializing database tables: {str(e)}")
 
+    try:
+        from open_tutorai.tools.tools_registrar import register_otai_tools
+        register_otai_tools()
+    except Exception as e:
+        print(f"[OTAI] tools registration skipped: {e}")
+
 
 # Health check endpoint
 @app.post("/tutorai/health")
