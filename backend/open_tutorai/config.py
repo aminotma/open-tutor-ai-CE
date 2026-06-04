@@ -1,3 +1,5 @@
+import os
+
 from open_tutorai.env import (
     ENABLE_SIGNUP,
     ENABLE_LOGIN_FORM,
@@ -6,6 +8,16 @@ from open_tutorai.env import (
 )
 from pydantic import BaseModel
 from typing import Optional
+
+
+# ── Étape 1 — fonctions d'accès aux variables d'environnement OpenAI ─────────
+
+def get_openai_api_key() -> str:
+    return os.environ.get("OPENAI_API_KEY", "")
+
+
+def get_openai_base_url() -> str:
+    return os.environ.get("OPENAI_BASE_URL", "")
 
 
 class AppConfig(BaseModel):
@@ -49,7 +61,7 @@ CONTEXT_RETRIEVAL_CONFIG: dict = {
     "langchain": {
         "llm_model":            "gpt-4o-mini",
         "llm_temperature":      0.2,
-        "orchestrator_use_llm": False,
+        "orchestrator_use_llm": True,
     },
     "react": {
         "max_iterations": 10,

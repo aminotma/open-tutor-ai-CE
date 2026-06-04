@@ -169,8 +169,8 @@ def test_orchestrator_routes_to_end():
 
 
 def test_orchestrator_max_iterations_guard():
-    from open_tutorai.agents.langgraph.orchestrator import orchestrator_node
-    state = {"iteration": 10, "agent_trace": [], "memory_context": [],
+    from open_tutorai.agents.langgraph.orchestrator import orchestrator_node, MAX_ITERATIONS_SAFETY
+    state = {"iteration": MAX_ITERATIONS_SAFETY, "agent_trace": [], "memory_context": [],
              "knowledge_graph": {}, "difficulties": [], "strategy": [],
              "exercises": [], "verification": {}, "weak_concepts": [],
              "topic": "t", "current_level": "intermediate",

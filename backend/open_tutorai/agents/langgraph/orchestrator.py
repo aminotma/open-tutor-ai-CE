@@ -1,32 +1,123 @@
-"""OrchestratorAgent — deterministic routing with optional LLM fallback."""
+"""OrchestratorAgent — LLM comme décideur principal, _route() comme fallback.
+
+Agentisation : le LLM est maintenant appelé EN PREMIER et prend la décision de routage.
+_route() n'est appelé que si le LLM échoue ou retourne une valeur invalide.
+"""
 from __future__ import annotations
+
+import json
 
 from open_tutorai.agents.langgraph.state import TutorGraphState
 from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG
 
-MAX_ITERATIONS = 10
+MAX_ITERATIONS_SAFETY = 15
 
 
 def orchestrator_node(state: TutorGraphState) -> dict:
     iteration = state.get("iteration", 0)
     trace     = state.get("agent_trace", [])
 
-    # Guard against infinite loops
-    if iteration >= MAX_ITERATIONS:
-        trace = trace + [f"[Orchestrator] MAX_ITERATIONS={MAX_ITERATIONS} reached → END"]
+    if iteration >= MAX_ITERATIONS_SAFETY:
+        trace = trace + [f"[Orchestrator] safety ceiling {MAX_ITERATIONS_SAFETY} → END"]
         return {"next_agent": "END", "agent_trace": trace}
 
-    next_ag = _route(state)
+    # ── LLM en décideur principal, _route() en fallback ───────────────────────
+    next_ag, reasoning, confidence, used_llm = _llm_route(state)
 
-    # Optional LLM override for ambiguous cases
-    if CONTEXT_RETRIEVAL_CONFIG["langchain"].get("orchestrator_use_llm", False):
-        next_ag = _llm_route(state, next_ag)
+    conf_tag = f" [conf={confidence:.2f}]" if confidence is not None else ""
+    src_tag  = " [LLM]" if used_llm else " [fallback]"
+    trace = trace + [f"[Orchestrator] → {next_ag} (iter={iteration}){conf_tag}{src_tag}"]
 
-    trace = trace + [f"[Orchestrator] → {next_ag} (iter={iteration})"]
-    return {"next_agent": next_ag, "agent_trace": trace, "iteration": iteration + 1}
+    agent_reasoning = state.get("agent_reasoning") or {}
+    if reasoning:
+        agent_reasoning = {**agent_reasoning, f"orchestrator_iter_{iteration}": reasoning}
+
+    return {
+        "next_agent":      next_ag,
+        "agent_trace":     trace,
+        "iteration":       iteration + 1,
+        "agent_reasoning": agent_reasoning,
+    }
 
 
-# ── Deterministic fast-path ───────────────────────────────────────────────────
+# ── LLM — décideur principal ──────────────────────────────────────────────────
+
+def _llm_route(
+    state: TutorGraphState,
+) -> tuple[str, str | None, float | None, bool]:
+    """
+    Demande au LLM de choisir le prochain agent.
+    Retourne (next_agent, reasoning, confidence, used_llm).
+    Si le LLM échoue, appelle _route() comme fallback déterministe.
+    """
+    try:
+        from open_tutorai.config import get_openai_api_key, get_openai_base_url
+        from langchain_openai import ChatOpenAI
+        from langchain_core.messages import HumanMessage
+
+        lc_cfg = CONTEXT_RETRIEVAL_CONFIG["langchain"]
+        llm = ChatOpenAI(
+            model=lc_cfg.get("llm_model", "gpt-4o-mini"),
+            temperature=0.0,
+            api_key=get_openai_api_key(),
+            base_url=get_openai_base_url() or None,
+        )
+
+        trace        = state.get("agent_trace", [])
+        verification = state.get("verification", {})
+        n_retries    = {
+            ag: _count(trace, f"[{ag}Agent]")
+            for ag in ("Memory", "Knowledge", "Diagnostics", "Planner",
+                       "Exercise", "Verifier", "Feedback")
+        }
+        mem_summary = [
+            m.get("content", "")[:80]
+            for m in (state.get("memory_context") or [])[:3]
+        ]
+
+        prompt = (
+            "You are the orchestrator of an adaptive tutoring system. "
+            "Your role is to decide which agent to run next based on the current state.\n\n"
+            f"topic:            {state['topic']}\n"
+            f"level:            {state.get('adjusted_level', '?')}\n"
+            f"weak_concepts:    {state.get('weak_concepts', [])[:5]}\n"
+            f"iteration:        {state.get('iteration', 0)}\n"
+            f"agent_trace (last 8): {trace[-8:]}\n"
+            f"n_retries:        {n_retries}\n"
+            f"verification:     verdict={verification.get('verdict')}, "
+            f"score={verification.get('support_score')}, "
+            f"unsupported={verification.get('unsupported_items', [])[:3]}\n"
+            f"memory_summary:   {mem_summary}\n"
+            f"human_feedback:   {state.get('human_feedback', '')[:100]}\n\n"
+            "Valid agents: memory, knowledge, diagnostics, planner, exercise, verifier, feedback, END\n\n"
+            "Rules:\n"
+            "- Run memory → knowledge → diagnostics first if not yet done\n"
+            "- Then planner → exercise → verifier in order\n"
+            "- If verification needs_review AND retries < 2: retry planner\n"
+            "- Run feedback if weak_concepts remain and feedback not yet done\n"
+            "- Return END when: verification score >= 0.65 AND objectives covered "
+            "OR no further improvement is possible\n\n"
+            "Respond ONLY with valid JSON — no markdown:\n"
+            '{"next_agent": "<name>", "reasoning": "<one sentence why>", "confidence": <0.0-1.0>}'
+        )
+
+        resp = llm.invoke([HumanMessage(content=prompt)])
+        data = json.loads(resp.content.strip())
+
+        valid = {"memory", "knowledge", "diagnostics", "planner",
+                 "exercise", "verifier", "feedback", "END"}
+        agent = data.get("next_agent", "")
+        if agent not in valid:
+            raise ValueError(f"invalid agent: {agent}")
+
+        return agent, data.get("reasoning"), float(data.get("confidence", 0.5)), True
+
+    except Exception:
+        # Fallback déterministe
+        return _route(state), None, None, False
+
+
+# ── Fallback déterministe ─────────────────────────────────────────────────────
 
 def _ran(trace: list, tag: str) -> bool:
     return any(tag in t for t in trace)
@@ -36,13 +127,12 @@ def _count(trace: list, tag: str) -> int:
     return sum(1 for t in trace if tag in t)
 
 
-MAX_PLAN_RETRIES = 2  # max needs_review retries
+MAX_PLAN_RETRIES = 2
 
 
 def _route(state: TutorGraphState) -> str:
     trace = state.get("agent_trace", [])
 
-    # Phase 1 — load context (each agent runs exactly once)
     if not _ran(trace, "[MemoryAgent]"):
         return "memory"
     if not _ran(trace, "[KnowledgeAgent]"):
@@ -50,7 +140,6 @@ def _route(state: TutorGraphState) -> str:
     if not _ran(trace, "[DiagnosticsAgent]"):
         return "diagnostics"
 
-    # Phase 2 — plan → exercise → verify cycle (may retry on needs_review)
     n_plan     = _count(trace, "[PlannerAgent]")
     n_exercise = _count(trace, "[ExerciseAgent]")
     n_verifier = _count(trace, "[VerifierAgent]")
@@ -62,49 +151,11 @@ def _route(state: TutorGraphState) -> str:
     if n_verifier < n_exercise:
         return "verifier"
 
-    # Retry only if verifier said needs_review and we haven't hit the retry cap
     if state.get("verification", {}).get("verdict") == "needs_review":
         if n_plan <= MAX_PLAN_RETRIES:
             return "planner"
 
-    # Phase 3 — feedback (once, only when weak concepts remain)
     if state.get("weak_concepts") and not _ran(trace, "[FeedbackAgent]"):
         return "feedback"
 
     return "END"
-
-
-# ── Optional LLM override ─────────────────────────────────────────────────────
-
-def _llm_route(state: TutorGraphState, default: str) -> str:
-    try:
-        from open_tutorai.config import get_openai_api_key, get_openai_base_url
-        from langchain_openai import ChatOpenAI
-        from langchain_core.messages import HumanMessage
-
-        lc_cfg = CONTEXT_RETRIEVAL_CONFIG["langchain"]
-        llm = ChatOpenAI(
-            model=lc_cfg.get("llm_model", "gpt-4o-mini"),
-            temperature=0.0,
-            api_key=get_openai_api_key(),
-            base_url=get_openai_base_url(),
-        )
-        prompt = (
-            f"You orchestrate an adaptive tutor. Current state:\n"
-            f"- topic: {state['topic']}\n"
-            f"- level: {state.get('adjusted_level', '?')}\n"
-            f"- weak_concepts: {state.get('weak_concepts', [])[:5]}\n"
-            f"- verification verdict: {state.get('verification', {}).get('verdict')}\n"
-            f"- iteration: {state.get('iteration', 0)}\n\n"
-            f"Choose the next agent from: "
-            f"memory, knowledge, diagnostics, planner, exercise, verifier, feedback, END\n"
-            f"Reply with ONLY the agent name."
-        )
-        resp = llm.invoke([HumanMessage(content=prompt)])
-        decision = resp.content.strip().lower()
-        valid = {"memory","knowledge","diagnostics","planner","exercise","verifier","feedback","END"}
-        if decision in valid:
-            return decision
-    except Exception:
-        pass
-    return default

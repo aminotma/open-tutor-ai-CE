@@ -344,6 +344,34 @@ _CS_STUBS: dict[str, str] = {
     ),
 }
 
+# SQL query stubs by level — executed against the built-in SQLite sample DB
+_SQL_STUBS: dict[str, str] = {
+    "beginner": "SELECT * FROM Customers;",
+    "intermediate": "SELECT CustomerName, Country\nFROM Customers\nWHERE Country = 'France';",
+    "advanced": (
+        "SELECT c.CustomerName, COUNT(o.OrderID) AS nb_orders\n"
+        "FROM Customers c\n"
+        "JOIN Orders o ON c.CustomerID = o.CustomerID\n"
+        "GROUP BY c.CustomerName\n"
+        "ORDER BY nb_orders DESC;"
+    ),
+}
+
+# Keywords that indicate the topic is SQL/database (not generic CS)
+_SQL_KEYWORDS: frozenset[str] = frozenset({
+    "sql", "select", "requête", "requete", "query", "base de données",
+    "database", "table", "join", "jointure", "insert", "update", "delete",
+    "where", "group by", "order by", "create table", "sqlite", "mysql",
+    "postgresql", "sgbd", "dbms",
+})
+
+
+def _is_sql_topic(topic: str) -> bool:
+    """Return True if the topic is SQL/database-oriented."""
+    tl = topic.lower()
+    return any(kw in tl for kw in _SQL_KEYWORDS)
+
+
 # Math expressions by level — used when no keyword hint matches
 _MATH_EXPR_BY_LEVEL: dict[str, str] = {
     "beginner":     "2**8",
@@ -442,8 +470,21 @@ def generate_typed_exercises(
             "skill_target": obj,
         }
 
+        # ── SQL: query exercise (cs topic with SQL keywords) ─────────────
+        if subject == "cs" and _is_sql_topic(topic):
+            stub = _SQL_STUBS.get(level, _SQL_STUBS["intermediate"])
+            base.update({
+                "type":               "sql",
+                "question":           _localise("sql_question", language, obj=obj, topic=topic),
+                "hint":               _localise("sql_hint",     language, obj=obj, topic=topic),
+                "answer":             _localise("sql_answer",   language, obj=obj, topic=topic),
+                "sql_query":          stub,
+                "code_language":      "sql",
+                "expected_row_count": -1,
+            })
+
         # ── CS: coding exercise ───────────────────────────────────────────
-        if subject == "cs":
+        elif subject == "cs":
             stub = _CS_STUBS.get(level, _CS_STUBS["intermediate"]).format(obj=obj[:60])
             base.update({
                 "type":         "coding",
@@ -672,6 +713,24 @@ _TYPED_STRINGS: dict[str, dict[str, str]] = {
         "ar": "إجابة دقيقة تذكر العوامل التاريخية الرئيسية.",
         "es": "Una respuesta precisa mencionando los factores históricos clave.",
         "en": "A precise answer mentioning key historical factors.",
+    },
+    "sql_question": {
+        "fr": "Écris une requête SQL pour : {obj} (tables disponibles : Customers, Products, Orders, Employees).",
+        "ar": "اكتب استعلام SQL لـ: {obj} (الجداول المتاحة: Customers, Products, Orders, Employees).",
+        "es": "Escribe una consulta SQL para: {obj} (tablas disponibles: Customers, Products, Orders, Employees).",
+        "en": "Write a SQL query to: {obj} (available tables: Customers, Products, Orders, Employees).",
+    },
+    "sql_hint": {
+        "fr": "Commence par SELECT … FROM, puis ajoute WHERE ou JOIN si nécessaire.",
+        "ar": "ابدأ بـ SELECT … FROM ثم أضف WHERE أو JOIN إذا لزم الأمر.",
+        "es": "Empieza con SELECT … FROM, luego añade WHERE o JOIN si es necesario.",
+        "en": "Start with SELECT … FROM, then add WHERE or JOIN if needed.",
+    },
+    "sql_answer": {
+        "fr": "Une requête correcte qui retourne les lignes attendues sans erreur.",
+        "ar": "استعلام صحيح يُرجع الصفوف المتوقعة دون أخطاء.",
+        "es": "Una consulta correcta que devuelve las filas esperadas sin errores.",
+        "en": "A correct query that returns the expected rows without errors.",
     },
     # shared math_answer / science_answer — use expression directly
 }

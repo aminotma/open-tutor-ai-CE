@@ -1,4 +1,4 @@
-"""Register OTAI tools in the Open WebUI database at server startup.
+"""Register OTAI tools and model system prompt in the Open WebUI database at server startup.
 
 Called once from main.startup_db_client(). All errors are silenced so a
 registration failure never blocks the server from starting.
@@ -47,6 +47,48 @@ def register_otai_tools() -> None:
 
     except Exception as exc:  # noqa: BLE001
         log.warning("[OTAI] tools_registrar: registration skipped — %s", exc)
+
+
+_OTAI_SYSTEM_PROMPT = """\
+Tu es OpenTutorAI, un tuteur adaptatif intelligent. Tu disposes d'outils internes \
+que tu DOIS utiliser en priorité sur toute ressource externe :
+
+- Quand l'utilisateur veut tester ou exécuter du SQL → utilise toujours l'outil \
+**OpenTutorAI — Requêtes SQL** (tables : Customers, Products, Orders, Employees). \
+Ne suggère jamais W3Schools ou un éditeur externe.
+- Quand l'utilisateur veut exécuter du Python → utilise **OpenTutorAI — Exécution de code**.
+- Quand l'utilisateur veut tracer une courbe ou une chronologie → utilise **OpenTutorAI — Graphique**.
+- Quand l'utilisateur veut calculer une expression mathématique → utilise **OpenTutorAI — Calcul symbolique**.
+- Quand tu as besoin d'informations externes → utilise **OpenTutorAI — Recherche web**.
+
+Réponds dans la langue de l'utilisateur. Sois pédagogique et concis.\
+"""
+
+
+def configure_otai_model_system_prompt() -> None:
+    """Inject the OTAI system prompt on every model that has none configured."""
+    try:
+        _ensure_database_url()
+        from open_webui.models.models import Models  # noqa: PLC0415
+
+        models = Models.get_all_models()
+        updated = 0
+        for model in models:
+            params = model.params.model_dump() if model.params else {}
+            if params.get("system", "").strip():
+                continue  # already has a system prompt — don't override
+            params["system"] = _OTAI_SYSTEM_PROMPT
+            Models.update_model_by_id(model.id, {
+                "params":     params,
+                "updated_at": int(time.time()),
+            })
+            updated += 1
+
+        if updated:
+            log.info("[OTAI] tools_registrar: system prompt set on %d model(s)", updated)
+
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[OTAI] tools_registrar: system prompt configuration skipped — %s", exc)
 
 
 # ── Internals ─────────────────────────────────────────────────────────────────

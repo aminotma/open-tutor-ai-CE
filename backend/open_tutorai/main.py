@@ -73,8 +73,12 @@ async def startup_db_client():
         print(f"Error initializing database tables: {str(e)}")
 
     try:
-        from open_tutorai.tools.tools_registrar import register_otai_tools
+        from open_tutorai.tools.tools_registrar import (
+            register_otai_tools,
+            configure_otai_model_system_prompt,
+        )
         register_otai_tools()
+        configure_otai_model_system_prompt()
     except Exception as e:
         print(f"[OTAI] tools registration skipped: {e}")
 

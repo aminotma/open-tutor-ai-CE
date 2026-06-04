@@ -95,8 +95,8 @@ def test_ends_without_weak_concepts():
 
 
 def test_max_iterations_guard():
-    from open_tutorai.agents.langgraph.orchestrator import orchestrator_node
-    result = orchestrator_node(_base_state(iteration=10))
+    from open_tutorai.agents.langgraph.orchestrator import orchestrator_node, MAX_ITERATIONS_SAFETY
+    result = orchestrator_node(_base_state(iteration=MAX_ITERATIONS_SAFETY))
     ok = result["next_agent"] == "END"
     _metric("Garde MAX_ITERATIONS", result["next_agent"], "= END", ok)
     assert ok

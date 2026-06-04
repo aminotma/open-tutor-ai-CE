@@ -36,6 +36,12 @@ class TutorGraphState(TypedDict):
     tool_results:       list      # ExerciseAgent tool outputs [{tool, exercise_id, ...}]
     verification:       dict      # {verdict, support_score, supported_items, ...}
 
+    # ── Agentic signals (Phase B / C / D) ─────────────────────────────────
+    agent_reasoning:       dict   # {agent_name: reasoning_text} — raisonnement interne par agent
+    tool_selection_log:    list   # [{agent, tool, rationale, result}] — log des appels d'outils
+    verification_feedback: list   # specific_feedback du VerifierAgent → PlannerAgent (retry)
+    human_feedback:        str    # réponse humaine injectée aux checkpoints interrupt()
+
     # ── Control ────────────────────────────────────────────────────────────
     next_agent:  str
     iteration:   int

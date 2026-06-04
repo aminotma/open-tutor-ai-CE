@@ -1,4 +1,4 @@
-"""Source code strings for the 4 OTAI tools registered in Open WebUI.
+"""Source code strings for the 5 OTAI tools registered in Open WebUI.
 
 Each constant is a self-contained Python module (class Tools) that Open WebUI
 exec-s dynamically when the LLM invokes the corresponding tool.
@@ -215,6 +215,59 @@ class Tools:
 '''
 
 
+# ── sql_evaluator ──────────────────────────────────────────────────────────────
+
+SQL_EVALUATOR_CODE = r'''"""
+title: OpenTutorAI — Requêtes SQL
+description: Exécute des requêtes SQL SELECT sur une base SQLite en mémoire avec des tables d'exemple (Customers, Products, Orders, Employees).
+"""
+
+
+class Tools:
+    def run_sql(self, query: str) -> str:
+        """
+        Exécute une requête SQL SELECT sur une base de données SQLite en mémoire
+        et retourne les résultats sous forme de tableau markdown.
+
+        Tables disponibles (données W3Schools) :
+        - Customers(CustomerID, CustomerName, ContactName, Country, City)
+        - Products(ProductID, ProductName, Category, Price, Stock)
+        - Orders(OrderID, CustomerID, ProductID, Quantity, OrderDate)
+        - Employees(EmployeeID, LastName, FirstName, Title, Country)
+
+        Utilise cet outil quand l'utilisateur demande de :
+        - Tester / exécuter une requête SQL (SELECT, JOIN, WHERE, GROUP BY...)
+        - Vérifier le résultat d'une requête SQL
+        - Apprendre SQL en pratiquant sur des données réelles
+        - Corriger ou déboguer une requête SQL
+
+        Seules les requêtes SELECT, WITH et EXPLAIN sont autorisées.
+
+        :param query: Requête SQL à exécuter (SELECT uniquement)
+        :return: Résultats formatés en tableau markdown ou message d'erreur
+        """
+        from open_tutorai.tools.sql_evaluator import sql_evaluator
+        result = sql_evaluator.invoke({"query": query})
+        if not result.get("success"):
+            return "**Erreur SQL :**\n```\n" + result.get("error", "inconnue") + "\n```"
+        rows = result.get("rows", [])
+        columns = result.get("columns", [])
+        row_count = result.get("row_count", 0)
+        if not rows:
+            return "La requête s'est exécutée sans erreur mais n'a retourné aucune ligne."
+        header = "| " + " | ".join(columns) + " |"
+        separator = "| " + " | ".join("---" for _ in columns) + " |"
+        lines = [
+            "**Résultat (" + str(row_count) + " ligne(s)) :**\n",
+            header,
+            separator,
+        ]
+        for row in rows:
+            lines.append("| " + " | ".join(str(row.get(c, "")) for c in columns) + " |")
+        return "\n".join(lines)
+'''
+
+
 # ── Registry manifest ──────────────────────────────────────────────────────────
 
 TOOLS_MANIFEST = [
@@ -241,5 +294,11 @@ TOOLS_MANIFEST = [
         "name": "OpenTutorAI — Recherche web",
         "code": SEARCH_WEB_CODE,
         "description": "Recherche des informations sur le web via DuckDuckGo.",
+    },
+    {
+        "id":   "otai_sql_evaluator",
+        "name": "OpenTutorAI — Requêtes SQL",
+        "code": SQL_EVALUATOR_CODE,
+        "description": "Exécute des requêtes SQL SELECT sur une base SQLite avec tables d'exemple.",
     },
 ]
