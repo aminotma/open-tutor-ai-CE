@@ -1,7 +1,7 @@
-"""OrchestratorAgent — LLM comme décideur principal, _route() comme fallback.
+"""OrchestratorAgent — LLM as the primary decision-maker, _route() as fallback.
 
-Agentisation : le LLM est maintenant appelé EN PREMIER et prend la décision de routage.
-_route() n'est appelé que si le LLM échoue ou retourne une valeur invalide.
+Agentisation: the LLM is now called FIRST and makes the routing decision.
+_route() is only called if the LLM fails or returns an invalid value.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def orchestrator_node(state: TutorGraphState) -> dict:
         trace = trace + [f"[Orchestrator] safety ceiling {MAX_ITERATIONS_SAFETY} → END"]
         return {"next_agent": "END", "agent_trace": trace}
 
-    # ── LLM en décideur principal, _route() en fallback ───────────────────────
+    # ── LLM as primary decision-maker, _route() as fallback ──────────────────
     next_ag, reasoning, confidence, used_llm = _llm_route(state)
 
     conf_tag = f" [conf={confidence:.2f}]" if confidence is not None else ""
@@ -40,28 +40,21 @@ def orchestrator_node(state: TutorGraphState) -> dict:
     }
 
 
-# ── LLM — décideur principal ──────────────────────────────────────────────────
+# ── LLM — primary decision-maker ─────────────────────────────────────────────
 
 def _llm_route(
     state: TutorGraphState,
 ) -> tuple[str, str | None, float | None, bool]:
     """
-    Demande au LLM de choisir le prochain agent.
-    Retourne (next_agent, reasoning, confidence, used_llm).
-    Si le LLM échoue, appelle _route() comme fallback déterministe.
+    Asks the LLM to choose the next agent.
+    Returns (next_agent, reasoning, confidence, used_llm).
+    If the LLM fails, calls _route() as a deterministic fallback.
     """
     try:
-        from open_tutorai.config import get_openai_api_key, get_openai_base_url
-        from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage
+        from open_tutorai.agents.langgraph.llm_factory import get_llm
 
-        lc_cfg = CONTEXT_RETRIEVAL_CONFIG["langchain"]
-        llm = ChatOpenAI(
-            model=lc_cfg.get("llm_model", "gpt-4o-mini"),
-            temperature=0.0,
-            api_key=get_openai_api_key(),
-            base_url=get_openai_base_url() or None,
-        )
+        llm = get_llm(state.get("llm_model"), temperature=0.0)
 
         trace        = state.get("agent_trace", [])
         verification = state.get("verification", {})
@@ -113,11 +106,11 @@ def _llm_route(
         return agent, data.get("reasoning"), float(data.get("confidence", 0.5)), True
 
     except Exception:
-        # Fallback déterministe
+        # Deterministic fallback
         return _route(state), None, None, False
 
 
-# ── Fallback déterministe ─────────────────────────────────────────────────────
+# ── Deterministic fallback ────────────────────────────────────────────────────
 
 def _ran(trace: list, tag: str) -> bool:
     return any(tag in t for t in trace)

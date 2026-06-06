@@ -1,8 +1,8 @@
-"""DiagnosticsAgent — évaluation LLM du niveau + détection LLM des gaps + interrupt P1.
+"""DiagnosticsAgent — LLM level assessment + LLM gap detection + P1 interrupt.
 
-Agentisation : assess_current_level() et detect_difficulties() (règles) remplacés par
-un LLM call structuré qui raisonne sur le profil complet de l'apprenant.
-Fallback déterministe conservé si le LLM est indisponible.
+Agentisation: assess_current_level() and detect_difficulties() (rule-based) replaced by
+a structured LLM call that reasons over the learner's full profile.
+Deterministic fallback preserved if the LLM is unavailable.
 """
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from open_tutorai.agents.langgraph.state import TutorGraphState
 def diagnostics_node(state: TutorGraphState) -> dict:
     from open_tutorai.agents.helpers import detect_subject
 
-    # ── Diagnostic LLM (agentique) avec fallback déterministe ────────────────
+    # ── LLM diagnostic (agentic) with deterministic fallback ─────────────────
     adjusted, difficulties, reasoning = _llm_diagnose(state)
 
-    # Enrichir avec signaux mémoire et concepts faibles KG
+    # Enrich with memory signals and KG weak concepts
     from open_tutorai.agents.helpers import extract_memory_signals
     memory_signals = extract_memory_signals(state["topic"], state.get("memory_context", []))
     difficulties   = list(dict.fromkeys(difficulties + memory_signals))[:5]
@@ -42,13 +42,13 @@ def diagnostics_node(state: TutorGraphState) -> dict:
     if reasoning:
         agent_reasoning = {**agent_reasoning, "diagnostics_llm": reasoning}
 
-    # Auto-critique
+    # Self-critique
     critique = _self_critique(adjusted, difficulties, state)
     if critique:
         agent_reasoning = {**agent_reasoning, "diagnostics": critique}
         trace = trace + [f"[DiagnosticsAgent] self-critique: {critique[:80]}"]
 
-    # Étape 13 — P1 interrupt
+    # Step 13 — P1 interrupt
     human_feedback = state.get("human_feedback", "")
     try:
         from langgraph.types import interrupt
@@ -83,26 +83,19 @@ def diagnostics_node(state: TutorGraphState) -> dict:
     }
 
 
-# ── Diagnostic LLM ────────────────────────────────────────────────────────────
+# ── LLM diagnostic ────────────────────────────────────────────────────────────
 
 def _llm_diagnose(state: TutorGraphState) -> tuple[str, list[str], str | None]:
     """
-    Évalue le niveau et les lacunes via LLM avec raisonnement structuré.
-    Retourne (adjusted_level, difficulties, reasoning).
-    Fallback vers les helpers déterministes si le LLM échoue.
+    Assesses the level and knowledge gaps via LLM with structured reasoning.
+    Returns (adjusted_level, difficulties, reasoning).
+    Falls back to deterministic helpers if the LLM fails.
     """
     try:
-        from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG, get_openai_api_key, get_openai_base_url
-        from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage
+        from open_tutorai.agents.langgraph.llm_factory import get_llm
 
-        lc_cfg = CONTEXT_RETRIEVAL_CONFIG["langchain"]
-        llm = ChatOpenAI(
-            model=lc_cfg.get("llm_model", "gpt-4o-mini"),
-            temperature=0.0,
-            api_key=get_openai_api_key(),
-            base_url=get_openai_base_url() or None,
-        )
+        llm = get_llm(state.get("llm_model"), temperature=0.0)
 
         interactions_summary = json.dumps(
             [{"score": i.get("score"), "content": i.get("content", "")[:80]}
@@ -144,7 +137,7 @@ def _llm_diagnose(state: TutorGraphState) -> tuple[str, list[str], str | None]:
         return level, difficulties, reasoning
 
     except Exception:
-        # Fallback déterministe
+        # Deterministic fallback
         from open_tutorai.agents.helpers import assess_current_level, detect_difficulties
         level = assess_current_level(
             state["current_level"],
@@ -160,23 +153,16 @@ def _llm_diagnose(state: TutorGraphState) -> tuple[str, list[str], str | None]:
         return level, difficulties, None
 
 
-# ── Auto-critique ─────────────────────────────────────────────────────────────
+# ── Self-critique ─────────────────────────────────────────────────────────────
 
 def _self_critique(
     adjusted_level: str, difficulties: list, state: TutorGraphState
 ) -> str | None:
     try:
-        from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG, get_openai_api_key, get_openai_base_url
-        from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage
+        from open_tutorai.agents.langgraph.llm_factory import get_llm
 
-        lc_cfg = CONTEXT_RETRIEVAL_CONFIG["langchain"]
-        llm = ChatOpenAI(
-            model=lc_cfg.get("llm_model", "gpt-4o-mini"),
-            temperature=0.0,
-            api_key=get_openai_api_key(),
-            base_url=get_openai_base_url() or None,
-        )
+        llm = get_llm(state.get("llm_model"), temperature=0.0)
         prompt = (
             "You are DiagnosticsAgent performing a self-critique.\n"
             f"Topic: {state['topic']}, "

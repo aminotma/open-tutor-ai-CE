@@ -1,7 +1,7 @@
 """Tool: search the web via DuckDuckGo and return structured snippets.
 
-Subjects : toutes matières (vérification de faits, données récentes)
-Exercise types : mcq (fact-check), explain (enrichissement), history
+Subjects: all subjects (fact-checking, recent data)
+Exercise types: mcq (fact-check), explain (enrichment), history
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def search_web(query: str, max_results: int = 5) -> dict:
         return {
             "success": False,
             "results": [],
-            "error": "duckduckgo-search is not installed. Run: pip install duckduckgo-search",
+            "error": "duckduckgo-search is not installed.",
         }
 
     try:
@@ -54,4 +54,10 @@ def search_web(query: str, max_results: int = 5) -> dict:
         }
 
     except Exception as exc:
-        return {"success": False, "results": [], "error": str(exc)}
+        # Never raise an exception — return a structured error
+        # to avoid breaking the SSE stream on the Open WebUI side
+        return {
+            "success": False,
+            "results": [],
+            "error": f"Search unavailable: {type(exc).__name__}: {exc}",
+        }

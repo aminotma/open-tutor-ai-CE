@@ -1,8 +1,8 @@
-"""FeedbackAgent — résumé LLM + persistance mémoire sélective + interrupt P3.
+"""FeedbackAgent — LLM summary + selective memory persistence + P3 interrupt.
 
-Agentisation : les templates d'écriture mémoire hardcodés remplacés par un LLM
-qui décide quoi mémoriser et comment formuler chaque souvenir.
-Fallback déterministe conservé si le LLM est indisponible.
+Agentisation: hardcoded memory-writing templates replaced by a LLM
+that decides what to memorise and how to phrase each memory entry.
+Deterministic fallback preserved if the LLM is unavailable.
 """
 from __future__ import annotations
 
@@ -25,14 +25,14 @@ def feedback_node(state: TutorGraphState) -> dict:
 
     trace = state.get("agent_trace", [])
 
-    # Auto-critique
+    # Self-critique
     agent_reasoning = state.get("agent_reasoning") or {}
     critique = _self_critique(level, weak, strategy, state)
     if critique:
         agent_reasoning = {**agent_reasoning, "feedback": critique}
         trace = trace + [f"[FeedbackAgent] self-critique: {critique[:80]}"]
 
-    # ── LLM décide quoi mémoriser ─────────────────────────────────────────────
+    # ── LLM decides what to memorise ──────────────────────────────────────────
     memory_entries, llm_reasoning = _llm_summarize(state, level, weak, strategy, verification)
     if llm_reasoning:
         agent_reasoning = {**agent_reasoning, "feedback_llm": llm_reasoning}
@@ -46,7 +46,7 @@ def feedback_node(state: TutorGraphState) -> dict:
         f"vérification : {verification.get('verdict', 'unknown')}."
     )
 
-    # Étape 13 — P3 interrupt
+    # Step 13 — P3 interrupt
     human_feedback = state.get("human_feedback", "")
     try:
         from langgraph.types import interrupt
@@ -79,7 +79,7 @@ def feedback_node(state: TutorGraphState) -> dict:
     except Exception:
         pass
 
-    # ── Persistance DB ────────────────────────────────────────────────────────
+    # ── DB persistence ────────────────────────────────────────────────────────
     try:
         from open_webui.internal.db import get_db
         from open_tutorai.services.knowledge_graph import KnowledgeGraphService
@@ -132,7 +132,7 @@ def feedback_node(state: TutorGraphState) -> dict:
     }
 
 
-# ── Résumé LLM ────────────────────────────────────────────────────────────────
+# ── LLM summary ───────────────────────────────────────────────────────────────
 
 def _llm_summarize(
     state: TutorGraphState,
@@ -142,22 +142,15 @@ def _llm_summarize(
     verification: dict,
 ) -> tuple[list[dict], str | None]:
     """
-    Le LLM décide quels souvenirs créer et comment les formuler.
-    Retourne (memory_entries, reasoning).
-    Fallback vers templates déterministes si le LLM échoue.
+    The LLM decides which memories to create and how to phrase them.
+    Returns (memory_entries, reasoning).
+    Falls back to deterministic templates if the LLM fails.
     """
     try:
-        from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG, get_openai_api_key, get_openai_base_url
-        from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage
+        from open_tutorai.agents.langgraph.llm_factory import get_llm
 
-        lc_cfg = CONTEXT_RETRIEVAL_CONFIG["langchain"]
-        llm = ChatOpenAI(
-            model=lc_cfg.get("llm_model", "gpt-4o-mini"),
-            temperature=0.1,
-            api_key=get_openai_api_key(),
-            base_url=get_openai_base_url() or None,
-        )
+        llm = get_llm(state.get("llm_model"), temperature=0.1)
 
         prompt = (
             "You are FeedbackAgent. Based on this learning session, decide what is worth "
@@ -207,7 +200,7 @@ def _llm_summarize(
         return entries, data.get("reasoning", "")
 
     except Exception:
-        # Fallback templates
+        # Fallback to templates
         return _fallback_memories(state, level, weak, strategy, verification), None
 
 
@@ -252,23 +245,16 @@ def _fallback_memories(
     return entries
 
 
-# ── Auto-critique ─────────────────────────────────────────────────────────────
+# ── Self-critique ─────────────────────────────────────────────────────────────
 
 def _self_critique(
     level: str, weak: list, strategy: list, state: TutorGraphState
 ) -> str | None:
     try:
-        from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG, get_openai_api_key, get_openai_base_url
-        from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage
+        from open_tutorai.agents.langgraph.llm_factory import get_llm
 
-        lc_cfg = CONTEXT_RETRIEVAL_CONFIG["langchain"]
-        llm = ChatOpenAI(
-            model=lc_cfg.get("llm_model", "gpt-4o-mini"),
-            temperature=0.0,
-            api_key=get_openai_api_key(),
-            base_url=get_openai_base_url() or None,
-        )
+        llm = get_llm(state.get("llm_model"), temperature=0.0)
         prompt = (
             "You are FeedbackAgent performing a self-critique before persisting memories.\n"
             f"Topic: {state['topic']}, Level: {level}\n"

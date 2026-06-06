@@ -70,8 +70,12 @@ class Tools:
         - Visualiser des faits historiques sur un axe temporel
           (ex: "montre la chronologie de la Révolution française")
 
-        :param events_json: JSON array [{year: int, label: str}, ...], ex:
-                            '[{"year": 1789, "label": "Révolution"}, {"year": 1815, "label": "Waterloo"}]'
+        :param events_json: JSON array of objects with keys "year" (int) and "label" (str).
+                            Each "label" MUST be a clean, standalone event name — no prefix,
+                            no sentence fragment, no trailing punctuation.
+                            CORRECT:   '[{"year": 1789, "label": "Révolution française"},
+                                         {"year": 1969, "label": "Premier homme sur la Lune"}]'
+                            INCORRECT: '[{"year": 1969, "label": "RéPremier homme sur la Lune"}]'
         :param title: Titre de la chronologie (optionnel)
         :return: Confirmation de génération ou message d'erreur
         """
@@ -193,10 +197,13 @@ class Tools:
         :param max_results: Nombre maximum de résultats (1-10, défaut 5)
         :return: Liste des résultats formatée en markdown
         """
-        from open_tutorai.tools.search_web import search_web
-        result = search_web.invoke({"query": query, "max_results": max_results})
+        try:
+            from open_tutorai.tools.search_web import search_web
+            result = search_web.invoke({"query": query, "max_results": max_results})
+        except Exception as exc:
+            return f"Recherche web indisponible ({type(exc).__name__}). Réponds à partir de tes connaissances."
         if not result.get("success"):
-            return "Erreur de recherche : " + result.get("error", "inconnue")
+            return "Recherche web indisponible : " + result.get("error", "inconnue") + ". Réponds à partir de tes connaissances."
         results = result.get("results", [])
         if not results:
             return "Aucun résultat trouvé pour : " + query

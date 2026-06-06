@@ -1,285 +1,285 @@
-# Scénarios d'évaluation — OpenTutorAI
+# Evaluation Scenarios — OpenTutorAI
 
 ---
 
-## Scénario 1 : Acquisition d'une notion
+## Scenario 1: Concept Acquisition
 
 **Session 1**
 
-> **Utilisateur :** Je débute en Python. Explique-moi les boucles `for`.
+> **User:** I'm new to Python. Explain `for` loops to me.
 
-### Attendu
+### Expected
 
-- Le système récupère les documents pédagogiques liés aux boucles.
-- Une explication adaptée à un débutant est produite.
-- Le niveau de l'utilisateur est enregistré dans la mémoire.
+- The system retrieves pedagogical documents related to loops.
+- An explanation adapted to a beginner is produced.
+- The user's level is recorded in memory.
 
-### Métriques
+### Metrics
 
-| Métrique | Description |
+| Metric | Description |
 |---|---|
-| `Recall@k` | Les bons documents sont-ils récupérés ? |
-| `Faithfulness` | La réponse est-elle ancrée dans les documents ? (détection hallucinations) |
-| `Learning Gain` | Progression entre pré-test et post-test |
-| Latence end-to-end | Temps de réponse total |
+| `Recall@k` | Are the right documents retrieved? |
+| `Faithfulness` | Is the answer grounded in the documents? (hallucination detection) |
+| `Learning Gain` | Progression between pre-test and post-test |
+| End-to-end latency | Total response time |
 
 ---
 
-## Scénario 2 : Vérification de la mémoire
+## Scenario 2: Memory Verification
 
-**Session 2 (nouvelle session)**
+**Session 2 (new session)**
 
-> **Utilisateur :** Continue le cours précédent et propose-moi un exercice.
+> **User:** Continue the previous lesson and give me an exercise.
 
-### Attendu
+### Expected
 
-Le système doit se souvenir que :
+The system must remember that:
 
-- le sujet était **Python** ;
-- le concept étudié était les **boucles for** ;
-- le niveau était **débutant**.
+- the topic was **Python**;
+- the concept studied was **for loops**;
+- the level was **beginner**.
 
-### Métriques — Mémoire
+### Metrics — Memory
 
-| Mémoire attendue | Récupérée ? |
+| Expected memory | Retrieved? |
 |---|:---:|
-| Python | ✅ Oui |
-| Boucles for | ✅ Oui |
-| Débutant | ✅ Oui |
+| Python | ✅ Yes |
+| For loops | ✅ Yes |
+| Beginner | ✅ Yes |
 
 $$\text{Memory Retrieval Accuracy} = \frac{3}{3} = 100\%$$
 
-| Métrique | Description | Cible |
+| Metric | Description | Target |
 |---|---|---|
-| `Memory Retrieval Accuracy` | Tous les champs attendus sont-ils récupérés ? | 100% |
+| `Memory Retrieval Accuracy` | Are all expected fields retrieved? | 100% |
 
 ---
 
-## Scénario 3 : Adaptation pédagogique
+## Scenario 3: Pedagogical Adaptation
 
-> **Utilisateur :** Les boucles `for` sont encore difficiles pour moi.
+> **User:** `for` loops are still difficult for me.
 
-### Attendu
+### Expected
 
-Le système doit :
+The system must:
 
-- détecter une difficulté ;
-- diminuer la complexité ;
-- proposer un nouvel exemple.
+- detect a difficulty;
+- reduce complexity;
+- propose a new example.
 
-### Vérification
+### Verification
 
-Comparer la réponse avec celle générée pour un utilisateur **avancé**.
+Compare the response with the one generated for an **advanced** user.
 
 ---
 
-## Scénario 4 : Test du RAG
+## Scenario 4: RAG Test
 
-### Base de documents
+### Document Base
 
-| ID | Contenu |
+| ID | Content |
 |---|---|
-| Doc1 | Boucles for |
-| Doc2 | Boucles while |
-| Doc3 | Fonctions Python |
-| Doc4 | Listes Python |
+| Doc1 | For loops |
+| Doc2 | While loops |
+| Doc3 | Python functions |
+| Doc4 | Python lists |
 
-> **Utilisateur :** Quelle est la différence entre une boucle `for` et une boucle `while` ?
+> **User:** What is the difference between a `for` loop and a `while` loop?
 
-### Résultats
+### Results
 
 | | Documents |
 |---|---|
-| **Attendus** | Doc1, Doc2 |
-| **Retournés** | Doc1, Doc2, Doc4 |
+| **Expected** | Doc1, Doc2 |
+| **Returned** | Doc1, Doc2, Doc4 |
 
-### Calcul des métriques
+### Metric Calculations
 
 $$\text{Precision@3} = \frac{2}{3} \approx 0.67$$
 
 $$\text{Recall@3} = \frac{2}{2} = 1$$
 
-$$\text{MRR} = 1 \quad \text{(le premier document pertinent est en position 1)}$$
+$$\text{MRR} = 1 \quad \text{(first relevant document is at position 1)}$$
 
-| Métrique | Valeur | Cible |
+| Metric | Value | Target |
 |---|---|---|
 | `Recall@3` | 1.0 | ≥ 0.80 |
-| `Faithfulness` | à mesurer | ≥ 0.85 |
+| `Faithfulness` | to measure | ≥ 0.85 |
 
 ---
 
-## Scénario 5 : Compression de contexte
+## Scenario 5: Context Compression
 
-Après plusieurs échanges :
+After multiple exchanges:
 
-| | Taille |
+| | Size |
 |---|---|
-| Contexte brut | 10 000 tokens |
-| Résumé généré | 2 500 tokens |
+| Raw context | 10,000 tokens |
+| Generated summary | 2,500 tokens |
 
 $$\text{Compression Ratio} = \frac{2500}{10000} = 0.25$$
 
-> Le système conserve **25 %** de la taille initiale.
+> The system retains **25%** of the original size.
 
 ---
 
-## Scénario 6 : Apprentissage longitudinal ⭐
+## Scenario 6: Longitudinal Learning ⭐
 
-> *Le scénario le plus représentatif de la mémoire long terme*
+> *The most representative scenario for long-term memory*
 
-### Déroulé des sessions
+### Session Flow
 
-| Session | Message utilisateur |
+| Session | User message |
 |---|---|
-| Session 1 | Je veux apprendre les fonctions Python. |
-| Session 2 | Je comprends les fonctions simples mais pas les paramètres. |
-| Session 3 | Fais-moi un quiz. |
-| Session 4 | Continue avec un niveau plus avancé. |
+| Session 1 | I want to learn Python functions. |
+| Session 2 | I understand simple functions but not parameters. |
+| Session 3 | Give me a quiz. |
+| Session 4 | Continue at a more advanced level. |
 
-### Attendu
+### Expected
 
-OpenTutorAI doit récupérer :
+OpenTutorAI must retrieve:
 
-- les notions déjà étudiées ;
-- les difficultés détectées ;
-- le niveau de maîtrise estimé.
+- concepts already studied;
+- detected difficulties;
+- estimated mastery level.
 
-### Ce scénario évalue
+### This scenario evaluates
 
-| Dimension | Description | Métrique |
+| Dimension | Description | Metric |
 |---|---|---|
-| Mémoire | Rappel des sessions passées | `Memory Retrieval Accuracy` |
-| Agentique | La tâche est-elle menée à terme ? | `Task Completion Rate` |
-| Pédagogie | L'apprenant a-t-il progressé ? | `Learning Gain` |
+| Memory | Recall of past sessions | `Memory Retrieval Accuracy` |
+| Agentic | Is the task completed? | `Task Completion Rate` |
+| Pedagogy | Has the learner progressed? | `Learning Gain` |
 
-$$\text{Learning Gain} = \frac{\text{score post-test} - \text{score pré-test}}{100 - \text{score pré-test}}$$
+$$\text{Learning Gain} = \frac{\text{post-test score} - \text{pre-test score}}{100 - \text{pre-test score}}$$
 
 ---
 
-## Scénario 7 : Routage agentique
+## Scenario 7: Agentic Routing
 
-> **Utilisateur :** Donne-moi un exercice sur les listes Python.
+> **User:** Give me an exercise on Python lists.
 
-### Attendu — séquence d'agents
+### Expected — agent sequence
 
 ```
-1. Router Agent        → identifie l'intention : "exercice"
-2. RAG Agent           → récupère Doc4 (Listes Python)
-3. Memory Agent        → lit le profil : niveau débutant
-4. Exercise Generator  → produit un exercice adapté au niveau
-5. BKT Agent           → enregistre la tentative
+1. Router Agent        → identifies intent: "exercise"
+2. RAG Agent           → retrieves Doc4 (Python Lists)
+3. Memory Agent        → reads profile: beginner level
+4. Exercise Generator  → produces an exercise adapted to level
+5. BKT Agent           → records the attempt
 ```
 
-### Métriques
+### Metrics
 
-| Métrique | Description | Cible |
+| Metric | Description | Target |
 |---|---|---|
-| `Task Completion Rate` | La tâche est-elle menée à terme sans blocage ? | 100% |
-| Tool Call Order | La séquence d'agents est-elle correcte ? | Exacte |
-| Latence end-to-end | Temps total de traitement | < 3s |
+| `Task Completion Rate` | Is the task completed without blocking? | 100% |
+| Tool Call Order | Is the agent sequence correct? | Exact |
+| End-to-end latency | Total processing time | < 3s |
 
-### Vérification
+### Verification
 
-Comparer la séquence réelle (logs) avec la séquence attendue. Toute déviation indique un défaut de routage.
+Compare the actual sequence (logs) with the expected sequence. Any deviation indicates a routing defect.
 
 ---
 
-## Scénario 8 : Conflit mémoire
+## Scenario 8: Memory Conflict
 
-### Déroulé
+### Flow
 
-| Session | Message utilisateur |
+| Session | User message |
 |---|---|
-| Session 1 | Je débute en Python, je n'ai jamais codé. |
-| Session 4 | En fait je fais du Python depuis 2 ans, je veux aller plus vite. |
+| Session 1 | I'm new to Python, I've never coded before. |
+| Session 4 | Actually I've been doing Python for 2 years, I want to go faster. |
 
-### Attendu
+### Expected
 
-Le système doit :
+The system must:
 
-- détecter la contradiction avec le profil enregistré ;
-- mettre à jour le niveau dans la mémoire (débutant → avancé) ;
-- adapter immédiatement le contenu proposé.
+- detect the contradiction with the recorded profile;
+- update the level in memory (beginner → advanced);
+- immediately adapt the proposed content.
 
-### Métriques
+### Metrics
 
-| Test | Résultat attendu |
+| Test | Expected result |
 |---|---|
-| Profil mis à jour ? | Oui |
-| Ancien profil écrasé ou versionné ? | Versionné (historique conservé) |
-| Contenu adapté dès la session 4 ? | Oui |
+| Profile updated? | Yes |
+| Old profile overwritten or versioned? | Versioned (history preserved) |
+| Content adapted from session 4? | Yes |
 
-### Vérification
+### Verification
 
-Interroger directement la mémoire après la session 4 et vérifier que le champ `niveau` contient `avancé` et que l'historique conserve `débutant` avec horodatage.
+Query the memory directly after session 4 and verify that the `level` field contains `advanced` and that the history preserves `beginner` with a timestamp.
 
 ---
 
-## Scénario 9 : Résistance à la perte de contexte
+## Scenario 9: Context Loss Resistance
 
-### Mise en place
+### Setup
 
-Simuler une longue session générant **~12 000 tokens** de contexte brut (dépassement de la fenêtre).
+Simulate a long session generating **~12,000 tokens** of raw context (window overflow).
 
-### Déroulé
+### Flow
 
-| Étape | Action |
+| Step | Action |
 |---|---|
-| 1 | 15 échanges sur les listes et fonctions Python |
-| 2 | Compression automatique déclenchée |
-| 3 | Nouvelle question : "Rappelle-moi ce qu'on a vu sur les listes." |
+| 1 | 15 exchanges on Python lists and functions |
+| 2 | Automatic compression triggered |
+| 3 | New question: "Remind me what we covered on lists." |
 
-### Attendu
+### Expected
 
-Le résumé compressé doit contenir :
+The compressed summary must contain:
 
-- les concepts abordés (listes, fonctions) ;
-- les difficultés détectées ;
-- le niveau estimé.
+- concepts covered (lists, functions);
+- detected difficulties;
+- estimated level.
 
-### Métriques
+### Metrics
 
-| Métrique | Formule | Cible |
+| Metric | Formula | Target |
 |---|---|---|
-| Compression Ratio | tokens_résumé / tokens_brut | ≤ 0.30 |
-| Information Retention | infos_clés_conservées / infos_clés_totales | ≥ 0.80 |
-| Cohérence réponse post-compression | Évaluation manuelle 1–5 | ≥ 4 |
+| Compression Ratio | summary_tokens / raw_tokens | ≤ 0.30 |
+| Information Retention | key_info_preserved / total_key_info | ≥ 0.80 |
+| Post-compression response coherence | Manual evaluation 1–5 | ≥ 4 |
 
-$$\text{Information Retention} = \frac{\text{infos clés conservées}}{\text{infos clés totales}} \geq 80\%$$
+$$\text{Information Retention} = \frac{\text{key info preserved}}{\text{total key info}} \geq 80\%$$
 
 ---
 
-## Scénario 10 : Mise à jour BKT (Bayesian Knowledge Tracing)
+## Scenario 10: BKT Update (Bayesian Knowledge Tracing)
 
-### Déroulé
+### Flow
 
-| Exercice | Résultat | P(maîtrise) attendu |
+| Exercise | Result | Expected P(mastery) |
 |---|---|---|
-| Exercice 1 — Boucles for | ✅ Correct | Augmente |
-| Exercice 2 — Boucles for | ✅ Correct | Augmente |
-| Exercice 3 — Boucles for | ❌ Incorrect | Diminue légèrement |
-| Exercice 4 — Boucles for | ✅ Correct | Augmente |
+| Exercise 1 — For loops | ✅ Correct | Increases |
+| Exercise 2 — For loops | ✅ Correct | Increases |
+| Exercise 3 — For loops | ❌ Incorrect | Decreases slightly |
+| Exercise 4 — For loops | ✅ Correct | Increases |
 
-### Attendu
+### Expected
 
-- `P(maîtrise)` progresse de manière cohérente avec les résultats.
-- Après 3 réponses correctes consécutives, le système propose automatiquement un concept plus avancé.
-- Un résultat incorrect ne réinitialise pas la progression — il la ralentit seulement.
+- `P(mastery)` progresses in a manner consistent with the results.
+- After 3 consecutive correct answers, the system automatically proposes a more advanced concept.
+- An incorrect answer does not reset the progression — it only slows it down.
 
-### Métriques
+### Metrics
 
-| Métrique | Description |
+| Metric | Description |
 |---|---|
-| BKT Calibration | Écart entre `P(maîtrise)` estimé et performance réelle |
-| Threshold Detection | Le seuil de promotion vers le niveau suivant est-il franchi au bon moment ? |
-| Régression correcte | Une erreur diminue-t-elle `P(maîtrise)` sans tout réinitialiser ? |
+| BKT Calibration | Gap between estimated `P(mastery)` and actual performance |
+| Threshold Detection | Is the promotion threshold to the next level crossed at the right time? |
+| Correct regression | Does an error decrease `P(mastery)` without resetting everything? |
 
-### Vérification
+### Verification
 
 ```
-P(maîtrise) initial        : 0.10
-Après exercice 1 (✅)      : ~0.35
-Après exercice 2 (✅)      : ~0.60
-Après exercice 3 (❌)      : ~0.45
-Après exercice 4 (✅)      : ~0.65 → promotion déclenchée si seuil = 0.65
+Initial P(mastery)         : 0.10
+After exercise 1 (✅)      : ~0.35
+After exercise 2 (✅)      : ~0.60
+After exercise 3 (❌)      : ~0.45
+After exercise 4 (✅)      : ~0.65 → promotion triggered if threshold = 0.65
 ```

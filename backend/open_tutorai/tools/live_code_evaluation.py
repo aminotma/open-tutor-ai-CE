@@ -1,7 +1,7 @@
 """Tool: execute a student code snippet in an isolated subprocess and return the result.
 
-Subjects : informatique, algorithmique, sciences numériques
-Exercise types : coding, debugging, fill_in_blank (when the answer is executable)
+Subjects: computer science, algorithms, digital sciences
+Exercise types: coding, debugging, fill_in_blank (when the answer is executable)
 """
 from __future__ import annotations
 

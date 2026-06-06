@@ -1,7 +1,7 @@
 """Tool: check grammar and orthography of a text via an LLM call.
 
-Subjects : langues vivantes (français, anglais, arabe, espagnol, …)
-Exercise types : dictation, writing, translation, fill_in_blank (text)
+Subjects: modern languages (French, English, Arabic, Spanish, …)
+Exercise types: dictation, writing, translation, fill_in_blank (text)
 """
 from __future__ import annotations
 

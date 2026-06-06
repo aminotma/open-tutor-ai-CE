@@ -37,10 +37,13 @@ class TutorGraphState(TypedDict):
     verification:       dict      # {verdict, support_score, supported_items, ...}
 
     # ── Agentic signals (Phase B / C / D) ─────────────────────────────────
-    agent_reasoning:       dict   # {agent_name: reasoning_text} — raisonnement interne par agent
-    tool_selection_log:    list   # [{agent, tool, rationale, result}] — log des appels d'outils
-    verification_feedback: list   # specific_feedback du VerifierAgent → PlannerAgent (retry)
-    human_feedback:        str    # réponse humaine injectée aux checkpoints interrupt()
+    agent_reasoning:       dict   # {agent_name: reasoning_text} — internal reasoning per agent
+    tool_selection_log:    list   # [{agent, tool, rationale, result}] — log of tool calls
+    verification_feedback: list   # specific_feedback from VerifierAgent → PlannerAgent (retry)
+    human_feedback:        str    # human response injected at interrupt() checkpoints
+
+    # ── LLM provider (propagated from the frontend request) ───────────────
+    llm_model:   str   # e.g.: "gpt-4o-mini", "llama3:8b", "mistral"
 
     # ── Control ────────────────────────────────────────────────────────────
     next_agent:  str

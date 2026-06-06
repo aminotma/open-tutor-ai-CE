@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 
-# ── Étape 1 — fonctions d'accès aux variables d'environnement OpenAI ─────────
+# ── Step 1 — accessor functions for OpenAI environment variables ──────────────
 
 def get_openai_api_key() -> str:
     return os.environ.get("OPENAI_API_KEY", "")

@@ -1,7 +1,7 @@
 """Tool: generate a chart image (PNG base64) from data or a math function.
 
-Subjects : mathématiques, sciences (physique, chimie), histoire (timeline)
-Exercise types : chart, timeline, function_plot
+Subjects: mathematics, sciences (physics, chemistry), history (timeline)
+Exercise types: chart, timeline, function_plot
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def generate_chart(chart_type: str, payload: str) -> dict:
                 (uses sympy lambdify when available, otherwise eval)
 
             timeline:
-                {"events": [{"year": 1789, "label": "Révolution française"}, ...], "title": "..."}
+                {"events": [{"year": 1789, "label": "French Revolution"}, ...], "title": "..."}
 
     Returns:
         dict with keys:
@@ -87,7 +87,7 @@ def generate_chart(chart_type: str, payload: str) -> dict:
             fig.set_size_inches(12, 4)
             events = sorted(data["events"], key=lambda e: e["year"])
             years = [e["year"] for e in events]
-            labels = [e["label"] for e in events]
+            labels = [_clean_label(e["label"]) for e in events]
             span = max(years) - min(years) or 1
             ax.set_xlim(min(years) - span * 0.05, max(years) + span * 0.05)
             ax.set_ylim(-1.2, 1.2)
@@ -106,7 +106,7 @@ def generate_chart(chart_type: str, payload: str) -> dict:
                         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="steelblue", alpha=0.8))
             ax.set_yticks([])
             ax.spines[["left", "right", "top"]].set_visible(False)
-            ax.set_xlabel("Année")
+            ax.set_xlabel("Year")
 
         else:
             plt.close(fig)
@@ -129,6 +129,23 @@ def generate_chart(chart_type: str, payload: str) -> dict:
         except Exception:
             pass
         return {"success": False, "image_b64": "", "mime_type": "image/png", "error": str(exc)}
+
+
+# ── Helper: strip LLM generation artifacts from timeline labels ───────────────
+
+import re as _re
+
+def _clean_label(label: str) -> str:
+    """Remove leading lowercase fragment before the first uppercase letter.
+
+    Catches LLM artifacts like "RéPremier homme sur la Lune" → "Premier homme sur la Lune"
+    where a partial word ("Ré") was prepended before the intended label.
+    """
+    label = label.strip()
+    # Remove a short leading fragment (1-4 chars ending in lowercase) before an uppercase letter.
+    # Catches LLM artifacts like "RéPremier" → "Premier", "leGrand" → "Grand".
+    cleaned = _re.sub(r"^.{1,4}(?<=[a-záàâäéèêëîïôöùûüç])(?=[A-ZÁÀÂÄÉÈÊËÎÏÔÖÙÛÜ])", "", label)
+    return cleaned if cleaned else label
 
 
 # ── Helper: evaluate a math expression string over a list of x values ────────

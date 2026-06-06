@@ -1,8 +1,8 @@
-"""PlannerAgent — stratégie d'apprentissage LLM + enrichissement web + auto-critique.
+"""PlannerAgent — LLM learning strategy + web enrichment + self-critique.
 
-Agentisation : plan_learning_strategy() (règles if/elif) remplacé par un LLM call
-qui génère une stratégie raisonnée à partir du contexte complet.
-Fallback déterministe conservé si le LLM est indisponible.
+Agentisation: plan_learning_strategy() (if/elif rules) replaced by a LLM call
+that generates a reasoned strategy from the full context.
+Deterministic fallback preserved if the LLM is unavailable.
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def planner_node(state: TutorGraphState) -> dict:
     verification_feedback = state.get("verification_feedback", [])
     human_feedback        = state.get("human_feedback", "")
 
-    # Étape 10 — re-focus sur les éléments non vérifiés lors d'un retry
+    # Step 10 — re-focus on unverified items during a retry
     if verification.get("verdict") == "needs_review":
         unsupported = verification.get("unsupported_items", [])
         if unsupported:
@@ -25,14 +25,14 @@ def planner_node(state: TutorGraphState) -> dict:
         if verification_feedback:
             difficulties = difficulties + [fb[:120] for fb in verification_feedback[:2]]
 
-    # Étape 14 — intégrer le feedback humain libre de P1
+    # Step 14 — integrate free-form human feedback from P1
     if human_feedback and human_feedback.lower().strip() not in ("oui", "yes", "y", "o", ""):
         difficulties = difficulties + [f"Human feedback: {human_feedback[:100]}"]
 
-    # ── Planification LLM (agentique) avec fallback déterministe ─────────────
+    # ── LLM planning (agentic) with deterministic fallback ───────────────────
     decisions, strategy, reasoning = _llm_plan(state, difficulties)
 
-    # Étape 7 — enrichissement web si RAG insuffisant
+    # Step 7 — web enrichment if RAG is insufficient
     search_enriched = False
     if len(state.get("rag_docs", [])) < 2:
         strategy, search_enriched = _enrich_with_search(state["topic"], strategy)
@@ -51,7 +51,7 @@ def planner_node(state: TutorGraphState) -> dict:
     if reasoning:
         agent_reasoning = {**agent_reasoning, "planner_llm": reasoning}
 
-    # Auto-critique
+    # Self-critique
     critique = _self_critique(strategy, state)
     if critique:
         agent_reasoning = {**agent_reasoning, "planner": critique}
@@ -66,28 +66,21 @@ def planner_node(state: TutorGraphState) -> dict:
     }
 
 
-# ── Planification LLM ─────────────────────────────────────────────────────────
+# ── LLM planning ──────────────────────────────────────────────────────────────
 
 def _llm_plan(
     state: TutorGraphState, difficulties: list[str]
 ) -> tuple[list[dict], list[str], str | None]:
     """
-    Génère une stratégie pédagogique via LLM.
-    Retourne (decisions, strategy_actions, reasoning).
-    Fallback vers plan_learning_strategy() si le LLM échoue.
+    Generates a pedagogical strategy via LLM.
+    Returns (decisions, strategy_actions, reasoning).
+    Falls back to plan_learning_strategy() if the LLM fails.
     """
     try:
-        from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG, get_openai_api_key, get_openai_base_url
-        from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage
+        from open_tutorai.agents.langgraph.llm_factory import get_llm
 
-        lc_cfg = CONTEXT_RETRIEVAL_CONFIG["langchain"]
-        llm = ChatOpenAI(
-            model=lc_cfg.get("llm_model", "gpt-4o-mini"),
-            temperature=0.2,
-            api_key=get_openai_api_key(),
-            base_url=get_openai_base_url() or None,
-        )
+        llm = get_llm(state.get("llm_model"), temperature=0.2)
 
         rag_excerpt = " | ".join(
             d.get("content", "")[:120] for d in state.get("rag_docs", [])[:3]
@@ -137,7 +130,7 @@ def _llm_plan(
         return normalized, strategy, reasoning
 
     except Exception:
-        # Fallback déterministe
+        # Deterministic fallback
         from open_tutorai.agents.helpers import plan_learning_strategy
         decisions = plan_learning_strategy(
             state["topic"],
@@ -149,7 +142,7 @@ def _llm_plan(
         return decisions, [d["action"] for d in decisions], None
 
 
-# ── Enrichissement web ────────────────────────────────────────────────────────
+# ── Web enrichment ────────────────────────────────────────────────────────────
 
 def _enrich_with_search(topic: str, strategy: list[str]) -> tuple[list[str], bool]:
     try:
@@ -164,21 +157,14 @@ def _enrich_with_search(topic: str, strategy: list[str]) -> tuple[list[str], boo
     return strategy, False
 
 
-# ── Auto-critique ─────────────────────────────────────────────────────────────
+# ── Self-critique ─────────────────────────────────────────────────────────────
 
 def _self_critique(strategy: list[str], state: TutorGraphState) -> str | None:
     try:
-        from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG, get_openai_api_key, get_openai_base_url
-        from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage
+        from open_tutorai.agents.langgraph.llm_factory import get_llm
 
-        lc_cfg = CONTEXT_RETRIEVAL_CONFIG["langchain"]
-        llm = ChatOpenAI(
-            model=lc_cfg.get("llm_model", "gpt-4o-mini"),
-            temperature=0.0,
-            api_key=get_openai_api_key(),
-            base_url=get_openai_base_url() or None,
-        )
+        llm = get_llm(state.get("llm_model"), temperature=0.0)
         prompt = (
             "You are PlannerAgent performing a self-critique.\n"
             f"Topic: {state['topic']}, Level: {state.get('adjusted_level', state['current_level'])}\n"

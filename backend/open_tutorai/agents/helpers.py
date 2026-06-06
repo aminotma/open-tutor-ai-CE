@@ -218,7 +218,7 @@ _TEMPLATES: dict[str, dict[str, list[tuple]]] = {
     },
 }
 
-# Fallback si la langue n'est pas supportée
+# Fallback if the language is not supported
 _DEFAULT_LANG = "en"
 
 

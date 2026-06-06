@@ -1,12 +1,12 @@
-"""ExerciseAgent — ReAct pour sélection autonome des outils + auto-critique.
+"""ExerciseAgent — ReAct for autonomous tool selection + self-critique.
 
-Cascade de résolution du sujet (première valeur non vide) :
-  1. state['subject']          — déclaré par l'utilisateur
-  2. state['detected_subject'] — inféré par DiagnosticsAgent
-  3. detect_subject(topic, weak_concepts) — heuristique de dernier recours
+Subject resolution cascade (first non-empty value wins):
+  1. state['subject']          — declared by the user
+  2. state['detected_subject'] — inferred by DiagnosticsAgent
+  3. detect_subject(topic, weak_concepts) — last-resort heuristic
 
-Étape 6 : create_react_agent décide quels outils appeler et dans quel ordre.
-Étape 11 : auto-critique LLM avant de retourner les exercices.
+Step 6: create_react_agent decides which tools to call and in what order.
+Step 11: LLM self-critique before returning exercises.
 """
 from __future__ import annotations
 
@@ -30,14 +30,14 @@ def exercise_node(state: TutorGraphState) -> dict:
     _pfx = {"fr": "Maîtriser", "ar": "إتقان", "es": "Dominar"}.get(language, "Master")
     targeted = [f"{_pfx}: {c}" for c in weak[:2]] + objectives
 
-    # ── Cascade sujet ─────────────────────────────────────────────────────
+    # ── Subject cascade ───────────────────────────────────────────────────
     subject = state.get("subject", "").strip()
     if not subject:
         subject = state.get("detected_subject", "").strip()
     if not subject:
         subject = detect_subject(state["topic"], weak) or ""
 
-    # ── Génération des exercices ──────────────────────────────────────────
+    # ── Exercise generation ───────────────────────────────────────────────
     if subject:
         exercises = generate_typed_exercises(
             state["topic"], subject, level, targeted, count=3, language=language
@@ -47,7 +47,7 @@ def exercise_node(state: TutorGraphState) -> dict:
             state["topic"], level, targeted, count=3, language=language
         )
 
-    # ── Étape 6 — agent ReAct pour sélection autonome des outils ─────────
+    # ── Step 6 — ReAct agent for autonomous tool selection ────────────────
     tool_results, tool_selection_log = _react_tool_selection(exercises, state)
 
     trace = state.get("agent_trace", []) + [
@@ -58,7 +58,7 @@ def exercise_node(state: TutorGraphState) -> dict:
         tools_used = ", ".join(r["tool"] for r in tool_results)
         trace.append(f"[ExerciseAgent] tools: {tools_used}")
 
-    # Étape 11 — auto-critique
+    # Step 11 — self-critique
     agent_reasoning = state.get("agent_reasoning") or {}
     critique = _self_critique(exercises, state)
     if critique:
@@ -77,20 +77,19 @@ def exercise_node(state: TutorGraphState) -> dict:
     }
 
 
-# ── Étape 6 — sélection ReAct ─────────────────────────────────────────────────
+# ── Step 6 — ReAct tool selection ────────────────────────────────────────────
 
 def _react_tool_selection(
     exercises: list, state: TutorGraphState
 ) -> tuple[list[dict], list[dict]]:
     """
-    Utilise create_react_agent pour décider quels outils appeler sur chaque exercice.
-    Fallback vers le routage déterministe en cas d'erreur.
+    Uses create_react_agent to decide which tools to call for each exercise.
+    Falls back to deterministic routing on error.
     """
     try:
-        from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG, get_openai_api_key, get_openai_base_url
-        from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage
         from langgraph.prebuilt import create_react_agent
+        from open_tutorai.agents.langgraph.llm_factory import get_llm
 
         from open_tutorai.tools.live_code_evaluation import live_code_evaluation
         from open_tutorai.tools.math_evaluator       import math_evaluator
@@ -99,13 +98,7 @@ def _react_tool_selection(
         from open_tutorai.tools.search_web           import search_web
         from open_tutorai.tools.sql_evaluator        import sql_evaluator
 
-        lc_cfg = CONTEXT_RETRIEVAL_CONFIG["langchain"]
-        llm = ChatOpenAI(
-            model=lc_cfg.get("llm_model", "gpt-4o-mini"),
-            temperature=0.0,
-            api_key=get_openai_api_key(),
-            base_url=get_openai_base_url() or None,
-        )
+        llm = get_llm(state.get("llm_model"), temperature=0.0)
 
         tools = [live_code_evaluation, sql_evaluator, math_evaluator, generate_chart, grammar_checker, search_web]
         agent = create_react_agent(llm, tools)
@@ -156,7 +149,7 @@ def _react_tool_selection(
             if not (hasattr(msg, "tool_calls") and msg.tool_calls):
                 continue
             for tc in msg.tool_calls:
-                # Retrouver la ToolMessage correspondante
+                # Find the corresponding ToolMessage
                 tool_output = None
                 for subsequent in messages[i + 1:]:
                     if (hasattr(subsequent, "tool_call_id")
@@ -181,14 +174,14 @@ def _react_tool_selection(
         return tool_results, tool_selection_log
 
     except Exception:
-        # Fallback déterministe si le LLM ou create_react_agent n'est pas disponible
+        # Deterministic fallback if the LLM or create_react_agent is unavailable
         return _deterministic_tool_selection(exercises)
 
 
 def _deterministic_tool_selection(
     exercises: list,
 ) -> tuple[list[dict], list[dict]]:
-    """Fallback : routage déterministe basé sur les métadonnées de l'exercice."""
+    """Fallback: deterministic routing based on exercise metadata."""
     tool_results      = []
     tool_selection_log = []
     for ex in exercises:
@@ -205,7 +198,7 @@ def _deterministic_tool_selection(
 
 
 def _run_tool_for_exercise(ex: dict) -> dict | None:
-    """Routage déterministe d'origine — conservé comme fallback."""
+    """Original deterministic routing — preserved as fallback."""
     ex_type    = ex.get("type", "")
     ex_subject = ex.get("subject", "")
     ex_id      = ex.get("id", "")
@@ -268,21 +261,14 @@ def _run_tool_for_exercise(ex: dict) -> dict | None:
     return None
 
 
-# ── Étape 11 — auto-critique ──────────────────────────────────────────────────
+# ── Step 11 — self-critique ───────────────────────────────────────────────────
 
 def _self_critique(exercises: list, state: TutorGraphState) -> str | None:
     try:
-        from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG, get_openai_api_key, get_openai_base_url
-        from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage
+        from open_tutorai.agents.langgraph.llm_factory import get_llm
 
-        lc_cfg = CONTEXT_RETRIEVAL_CONFIG["langchain"]
-        llm = ChatOpenAI(
-            model=lc_cfg.get("llm_model", "gpt-4o-mini"),
-            temperature=0.0,
-            api_key=get_openai_api_key(),
-            base_url=get_openai_base_url() or None,
-        )
+        llm = get_llm(state.get("llm_model"), temperature=0.0)
         questions = [e.get("question", "") for e in exercises]
         prompt = (
             "You are ExerciseAgent performing a self-critique.\n"

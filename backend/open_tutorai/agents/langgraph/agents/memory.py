@@ -1,8 +1,8 @@
-"""MemoryAgent — chargement mémoire + tri LLM de pertinence.
+"""MemoryAgent — memory loading + LLM relevance ranking.
 
-Agentisation : après le chargement DB, le LLM filtre et priorise les souvenirs
-selon leur pertinence pour la session courante.
-Fallback : retourne les souvenirs bruts si le LLM est indisponible.
+Agentisation: after DB loading, the LLM filters and prioritises memories
+according to their relevance for the current session.
+Fallback: returns raw memories if the LLM is unavailable.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def memory_node(state: TutorGraphState) -> dict:
     query   = state.get("user_message") or topic
     types   = CONTEXT_RETRIEVAL_CONFIG["memory"]["memory_types"]
 
-    # ── Chargement DB ─────────────────────────────────────────────────────────
+    # ── DB loading ────────────────────────────────────────────────────────────
     try:
         from open_webui.internal.db import get_db
         from open_tutorai.services.context_retrieval import retrieve_internal_memory_sync
@@ -36,7 +36,7 @@ def memory_node(state: TutorGraphState) -> dict:
             "next_agent": "knowledge",
         }
 
-    # ── Tri LLM de pertinence ─────────────────────────────────────────────────
+    # ── LLM relevance ranking ─────────────────────────────────────────────────
     filtered, used_llm = _llm_filter(memories, state)
 
     trace = state.get("agent_trace", []) + [
@@ -46,34 +46,27 @@ def memory_node(state: TutorGraphState) -> dict:
     return {"memory_context": filtered, "agent_trace": trace, "next_agent": "knowledge"}
 
 
-# ── Filtrage LLM ──────────────────────────────────────────────────────────────
+# ── LLM filtering ─────────────────────────────────────────────────────────────
 
 def _llm_filter(
     memories: list[dict], state: TutorGraphState
 ) -> tuple[list[dict], bool]:
     """
-    Le LLM sélectionne les souvenirs les plus pertinents pour la session.
-    Retourne (filtered_memories, used_llm).
+    The LLM selects the most relevant memories for the current session.
+    Returns (filtered_memories, used_llm).
     """
     if not memories:
         return memories, False
 
-    # Pas besoin de filtrer si peu de souvenirs
+    # No need to filter if there are few memories
     if len(memories) <= 4:
         return memories, False
 
     try:
-        from open_tutorai.config import CONTEXT_RETRIEVAL_CONFIG, get_openai_api_key, get_openai_base_url
-        from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage
+        from open_tutorai.agents.langgraph.llm_factory import get_llm
 
-        lc_cfg = CONTEXT_RETRIEVAL_CONFIG["langchain"]
-        llm = ChatOpenAI(
-            model=lc_cfg.get("llm_model", "gpt-4o-mini"),
-            temperature=0.0,
-            api_key=get_openai_api_key(),
-            base_url=get_openai_base_url() or None,
-        )
+        llm = get_llm(state.get("llm_model"), temperature=0.0)
 
         indexed = [
             {"idx": i, "type": m.get("memory_type", ""), "content": m.get("content", "")[:120]}
@@ -106,5 +99,5 @@ def _llm_filter(
         return filtered, True
 
     except Exception:
-        # Fallback : garder les 6 premiers
+        # Fallback: keep the first 6
         return memories[:6], False

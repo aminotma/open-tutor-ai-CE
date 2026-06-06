@@ -1,4 +1,4 @@
-"""VerifierAgent — jugement pédagogique LLM structuré + interrupt P2."""
+"""VerifierAgent — structured LLM pedagogical judgement + P2 interrupt."""
 from __future__ import annotations
 
 import json
@@ -33,7 +33,7 @@ def verifier_node(state: TutorGraphState) -> dict:
             "next_agent":            "feedback",
         }
 
-    # Étape 9 — jugement LLM structuré (fallback texte si LLM indisponible)
+    # Step 9 — structured LLM judgement (text fallback if LLM is unavailable)
     verification, specific_feedback = _llm_verify(exercises, strategy, rag_docs, state, threshold)
 
     verdict = verification["verdict"]
@@ -44,7 +44,7 @@ def verifier_node(state: TutorGraphState) -> dict:
         f"score={verification.get('support_score', 0):.2f} → {next_ag}"
     ]
 
-    # Étape 13 — P2 interrupt : si needs_review, demander confirmation humaine
+    # Step 13 — P2 interrupt: if needs_review, request human confirmation
     human_feedback = state.get("human_feedback", "")
     if verdict == "needs_review":
         unsupported = verification.get("unsupported_items", [])
@@ -63,15 +63,15 @@ def verifier_node(state: TutorGraphState) -> dict:
                     "feedback":   specific_feedback[:3],
                 },
             })
-            # Étape 14 — consommer human_feedback
+            # Step 14 — consume human_feedback
             human_feedback = str(human_response)
             trace = trace + [f"[VerifierAgent] P2 human_feedback={human_feedback[:40]}"]
             if human_feedback.lower().strip() in ("oui", "yes", "y", "o"):
                 next_ag = "feedback"
                 trace = trace + ["[VerifierAgent] human approved → continue to feedback"]
         except Exception:
-            # ImportError si langgraph.types n'a pas interrupt()
-            # RuntimeError si appelé hors contexte LangGraph (tests unitaires)
+            # ImportError if langgraph.types does not have interrupt()
+            # RuntimeError if called outside a LangGraph context (unit tests)
             pass
 
     return {
@@ -83,7 +83,7 @@ def verifier_node(state: TutorGraphState) -> dict:
     }
 
 
-# ── Étape 9 — jugement LLM structuré ─────────────────────────────────────────
+# ── Step 9 — structured LLM judgement ────────────────────────────────────────
 
 def _llm_verify(
     exercises: list,
@@ -92,19 +92,12 @@ def _llm_verify(
     state:     TutorGraphState,
     threshold: float,
 ) -> tuple[dict, list]:
-    """Étape 9 : LLM renvoie { verdict, score, specific_feedback, unsupported_items }."""
+    """Step 9: LLM returns { verdict, score, specific_feedback, unsupported_items }."""
     try:
-        from open_tutorai.config import get_openai_api_key, get_openai_base_url
-        from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage
+        from open_tutorai.agents.langgraph.llm_factory import get_llm
 
-        lc_cfg = CONTEXT_RETRIEVAL_CONFIG["langchain"]
-        llm = ChatOpenAI(
-            model=lc_cfg.get("llm_model", "gpt-4o-mini"),
-            temperature=0.0,
-            api_key=get_openai_api_key(),
-            base_url=get_openai_base_url() or None,
-        )
+        llm = get_llm(state.get("llm_model"), temperature=0.0)
 
         corpus_excerpt = " | ".join(d.get("content", "")[:150] for d in rag_docs[:3])
         ex_questions   = [ex.get("question", "")[:120] for ex in exercises[:3]]
@@ -140,7 +133,7 @@ def _llm_verify(
         return verification, data.get("specific_feedback", [])
 
     except Exception:
-        # Fallback chevauchement textuel
+        # Fallback: text overlap verification
         return _text_overlap_verify(exercises, strategy, rag_docs, state["topic"], threshold)
 
 

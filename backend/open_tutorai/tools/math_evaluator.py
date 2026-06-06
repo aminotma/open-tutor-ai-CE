@@ -1,7 +1,7 @@
 """Tool: evaluate a mathematical expression or equation symbolically via sympy.
 
-Subjects : mathématiques, physique (formules numériques)
-Exercise types : calcul, équation, simplification, vérification de résultat
+Subjects: mathematics, physics (numerical formulas)
+Exercise types: computation, equation, simplification, result verification
 """
 from __future__ import annotations
 

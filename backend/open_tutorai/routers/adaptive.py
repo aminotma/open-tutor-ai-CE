@@ -1,9 +1,9 @@
 """
-Adaptive Tutor router — Phase agentique complète.
+Adaptive Tutor router — full agentic phase.
 
-POST /api/v1/adaptive/plan    → lancer le pipeline LangGraph (renvoie interrupted si P1/P2/P3)
-POST /api/v1/adaptive/resume  → reprendre après un interrupt() humain
-GET  /api/v1/adaptive/session/{session_id} → rejouer un état checkpointé
+POST /api/v1/adaptive/plan    → launch the LangGraph pipeline (returns interrupted if P1/P2/P3)
+POST /api/v1/adaptive/resume  → resume after a human interrupt()
+GET  /api/v1/adaptive/session/{session_id} → replay a checkpointed state
 """
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ class AdaptivePlanRequest(BaseModel):
     language:                 str   = "en"
     subject:                  str   = ""   # 'cs'|'math'|'science'|'language'|'history'
     user_message:             str   = ""
+    model:                    str   = ""   # LLM model chosen in the frontend (e.g.: "gpt-4o-mini", "llama3:8b")
     recent_interactions:      list  = Field(default_factory=list)
     feedback_comments:        list  = Field(default_factory=list)
     learning_objectives:      list  = Field(default_factory=list)
@@ -45,21 +46,21 @@ class AdaptivePlanResponse(BaseModel):
     strategy:              list
     verification:          dict
     agent_trace:           list
-    # Nouveaux champs agentiques
+    # New agentic fields
     agent_reasoning:       dict = Field(default_factory=dict)
     tool_selection_log:    list = Field(default_factory=list)
     verification_feedback: list = Field(default_factory=list)
-    # Étapes 12-14 — Human-in-the-Loop
+    # Steps 12-14 — Human-in-the-Loop
     interrupted:           bool = False
     interrupt_checkpoint:  Optional[str]  = None   # "P1" | "P2" | "P3"
-    interrupt_question:    Optional[str]  = None   # question posée à l'humain
-    interrupt_context:     Optional[dict] = None   # contexte pour l'UI
+    interrupt_question:    Optional[str]  = None   # question asked to the human
+    interrupt_context:     Optional[dict] = None   # context for the UI
 
 
 class ResumeRequest(BaseModel):
-    """Corps de la requête POST /adaptive/resume."""
+    """Body of the POST /adaptive/resume request."""
     session_id:     str
-    human_feedback: str   # réponse de l'utilisateur ("oui" / "non" / texte libre)
+    human_feedback: str   # user's response ("oui" / "non" / free text)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -70,12 +71,12 @@ async def adaptive_plan(
     user=Depends(get_verified_user),
 ):
     """
-    Lance le pipeline adaptatif complet.
-    Peut retourner interrupted=True si un checkpoint Human-in-the-Loop est déclenché.
+    Launch the full adaptive pipeline.
+    May return interrupted=True if a Human-in-the-Loop checkpoint is triggered.
     """
     session_id = body.session_id or uuid4().hex
 
-    # 1. Pré-chargement du contexte
+    # 1. Pre-load context
     try:
         with get_db() as db:
             session_summary = SummarizationService.get_cached_summary(
@@ -97,7 +98,7 @@ async def adaptive_plan(
         rag_docs        = []
         session_summary = ""
 
-    # 2. État initial du graphe
+    # 2. Initial graph state
     initial_state = {
         "user_id":                  user.id,
         "user_name":                getattr(user, "name", ""),
@@ -106,14 +107,15 @@ async def adaptive_plan(
         "language":                 body.language,
         "subject":                  body.subject,
         "user_message":             body.user_message,
+        "llm_model":                body.model,
         "recent_interactions":      body.recent_interactions,
         "feedback_comments":        body.feedback_comments,
         "learning_objectives":      body.learning_objectives,
         "preferred_exercise_types": body.preferred_exercise_types,
-        # Pré-chargé
+        # Pre-loaded
         "rag_docs":                 rag_docs,
         "session_summary":          session_summary,
-        # Sera peuplé par les agents
+        # Will be populated by agents
         "memory_context":           [],
         "knowledge_graph":          {},
         "weak_concepts":            [],
@@ -123,19 +125,20 @@ async def adaptive_plan(
         "strategy":                 [],
         "strategy_decisions":       [],
         "exercises":                [],
+        "tool_results":             [],
         "verification":             {},
-        # Champs agentiques (Phase B/C/D)
+        # Agentic fields (Phase B/C/D)
         "agent_reasoning":          {},
         "tool_selection_log":       [],
         "verification_feedback":    [],
         "human_feedback":           "",
-        # Contrôle
+        # Control
         "next_agent":               "",
         "iteration":                0,
         "agent_trace":              [],
     }
 
-    # 3. Invocation du graphe
+    # 3. Graph invocation
     return await _invoke_graph(initial_state, session_id)
 
 
@@ -145,8 +148,8 @@ async def adaptive_resume(
     user=Depends(get_verified_user),
 ):
     """
-    Étape 14 — reprendre le graphe après un checkpoint Human-in-the-Loop.
-    Injecte human_feedback via Command(resume=...).
+    Step 14 — resume the graph after a Human-in-the-Loop checkpoint.
+    Injects human_feedback via Command(resume=...).
     """
     try:
         from open_tutorai.agents.langgraph.graph import tutor_graph as _tutor_graph
@@ -154,7 +157,7 @@ async def adaptive_resume(
 
         config = {"configurable": {"thread_id": body.session_id}}
 
-        # Vérifier que la session appartient bien à l'utilisateur courant
+        # Verify that the session belongs to the current user
         snapshot = _tutor_graph.get_state(config)
         if not snapshot or not snapshot.values:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -181,7 +184,7 @@ async def get_session(
     session_id: str,
     user=Depends(get_verified_user),
 ):
-    """Rejoue / récupère le dernier état checkpointé d'une session."""
+    """Replay / retrieve the last checkpointed state of a session."""
     try:
         from open_tutorai.agents.langgraph.graph import tutor_graph as _tutor_graph
         config   = {"configurable": {"thread_id": session_id}}
@@ -199,7 +202,7 @@ async def get_session(
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 async def _invoke_graph(initial_state: dict, session_id: str) -> AdaptivePlanResponse:
-    """Invoque le graphe et gère les interruptions Human-in-the-Loop."""
+    """Invoke the graph and handle Human-in-the-Loop interruptions."""
     try:
         from open_tutorai.agents.langgraph.graph import tutor_graph as _tutor_graph
         config = {"configurable": {"thread_id": session_id}}
@@ -210,10 +213,10 @@ async def _invoke_graph(initial_state: dict, session_id: str) -> AdaptivePlanRes
         return _build_response(session_id, final_state)
 
     except Exception as exc:
-        # Étape 12 — détecter un interrupt() Human-in-the-Loop
+        # Step 12 — detect a Human-in-the-Loop interrupt()
         interrupt_info = _extract_interrupt(exc)
         if interrupt_info:
-            # Lire l'état partiel sauvegardé par le checkpointer
+            # Read the partial state saved by the checkpointer
             try:
                 from open_tutorai.agents.langgraph.graph import tutor_graph as _tutor_graph
                 config   = {"configurable": {"thread_id": session_id}}
@@ -239,7 +242,7 @@ async def _invoke_graph(initial_state: dict, session_id: str) -> AdaptivePlanRes
                 interrupt_context=interrupt_info.get("context"),
             )
 
-        # Fallback : pipeline agentique indisponible → helpers directs sans LLM
+        # Fallback: agentic pipeline unavailable → direct helpers without LLM
         try:
             return _fallback_response(initial_state, session_id, str(exc))
         except Exception as fallback_exc:
@@ -250,7 +253,7 @@ async def _invoke_graph(initial_state: dict, session_id: str) -> AdaptivePlanRes
 
 
 def _fallback_response(initial_state: dict, session_id: str, reason: str) -> AdaptivePlanResponse:
-    """Mode dégradé : contourne LangGraph et appelle les helpers directement."""
+    """Degraded mode: bypasses LangGraph and calls helpers directly."""
     from open_tutorai.agents.helpers import (
         assess_current_level,
         detect_difficulties,
@@ -297,15 +300,15 @@ def _fallback_response(initial_state: dict, session_id: str, reason: str) -> Ada
 
 
 def _extract_interrupt(exc: Exception) -> dict | None:
-    """Extrait les infos d'un GraphInterrupt si c'en est un."""
+    """Extract interrupt info from a GraphInterrupt if that is what it is."""
     try:
-        # LangGraph lève GraphInterrupt(interrupts=[Interrupt(value=...)])
+        # LangGraph raises GraphInterrupt(interrupts=[Interrupt(value=...)])
         cls_name = type(exc).__name__
         if "Interrupt" not in cls_name:
             return None
         interrupts = getattr(exc, "interrupts", None)
         if not interrupts:
-            # Essayer d'extraire depuis args
+            # Try to extract from args
             if exc.args:
                 payload = exc.args[0]
                 if isinstance(payload, list) and payload:

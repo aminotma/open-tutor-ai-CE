@@ -1,88 +1,88 @@
 # Phase 8 — Open WebUI Tools Integration (Chat Function Calling)
 
-## Objectif
+## Objective
 
-Rendre les outils pédagogiques d'OpenTutorAI (`generate_chart`, `math_evaluator`,
-`live_code_evaluation`, `search_web`) accessibles depuis le **chat classique** via
-le mécanisme de function calling d'Open WebUI — pas seulement depuis le pipeline
-LangGraph (ExerciseAgent).
+Make OpenTutorAI's pedagogical tools (`generate_chart`, `math_evaluator`,
+`live_code_evaluation`, `search_web`) accessible from the **standard chat** via
+Open WebUI's function calling mechanism — not only from the LangGraph pipeline
+(ExerciseAgent).
 
-## Problème résolu
+## Problem solved
 
-Avant cette phase, demander `"représente y = x² - 8"` dans le chat produisait
-une réponse texte (table de valeurs + conseil d'utiliser GeoGebra) car le LLM
-n'avait pas accès aux outils. Le graphique n'était généré que via le pipeline
-`/adaptive/plan`.
+Before this phase, asking `"plot y = x² - 8"` in the chat produced
+a text response (value table + advice to use GeoGebra) because the LLM
+had no access to tools. The chart was only generated via the
+`/adaptive/plan` pipeline.
 
 ---
 
 ## Architecture
 
 ```
-AVANT (Phase 7)
+BEFORE (Phase 7)
 ───────────────
-Chat classique  →  LLM répond en texte  →  ❌ aucun outil
-Pipeline adaptatif  →  ExerciseAgent  →  generate_chart  →  ✅ graphe
+Standard chat  →  LLM responds in text  →  ❌ no tools
+Adaptive pipeline  →  ExerciseAgent  →  generate_chart  →  ✅ chart
 
-APRÈS (Phase 8)
+AFTER (Phase 8)
 ───────────────
-Chat classique  →  LLM + function calling  →  otai_generate_chart  →  ✅ graphe
-                                           →  otai_math_evaluator  →  ✅ calcul
-                                           →  otai_live_code       →  ✅ exécution
-                                           →  otai_search_web      →  ✅ recherche
-Pipeline adaptatif  →  ExerciseAgent  →  outils LangChain (inchangé)  →  ✅
+Standard chat  →  LLM + function calling  →  otai_generate_chart  →  ✅ chart
+                                          →  otai_math_evaluator  →  ✅ calculation
+                                          →  otai_live_code       →  ✅ execution
+                                          →  otai_search_web      →  ✅ search
+Adaptive pipeline  →  ExerciseAgent  →  LangChain tools (unchanged)  →  ✅
 ```
 
 ---
 
-## Nouveaux fichiers
+## New files
 
 ### `backend/open_tutorai/tools/owui_tools.py`
 
-Définit le **code source** des 4 tools au format Open WebUI (classe `Tools` avec
-méthodes documentées). Ce code est stocké en base de données et exécuté
-dynamiquement par Open WebUI lors d'un appel du LLM.
+Defines the **source code** of the 4 tools in Open WebUI format (`Tools` class with
+documented methods). This code is stored in the database and executed
+dynamically by Open WebUI when the LLM makes a call.
 
-| Constante | Tool ID | Nom affiché | Méthodes LLM |
+| Constant | Tool ID | Display name | LLM methods |
 |-----------|---------|-------------|--------------|
-| `GENERATE_CHART_CODE` | `otai_generate_chart` | OpenTutorAI — Graphique | `plot_function()`, `plot_timeline()` |
-| `MATH_EVALUATOR_CODE` | `otai_math_evaluator` | OpenTutorAI — Calcul symbolique | `evaluate_expression()` |
-| `LIVE_CODE_CODE` | `otai_live_code` | OpenTutorAI — Exécution de code | `run_python()` |
-| `SEARCH_WEB_CODE` | `otai_search_web` | OpenTutorAI — Recherche web | `search()` |
+| `GENERATE_CHART_CODE` | `otai_generate_chart` | OpenTutorAI — Chart | `plot_function()`, `plot_timeline()` |
+| `MATH_EVALUATOR_CODE` | `otai_math_evaluator` | OpenTutorAI — Symbolic Calculation | `evaluate_expression()` |
+| `LIVE_CODE_CODE` | `otai_live_code` | OpenTutorAI — Code Execution | `run_python()` |
+| `SEARCH_WEB_CODE` | `otai_search_web` | OpenTutorAI — Web Search | `search()` |
 
-Chaque méthode :
-- a une docstring claire pour le LLM (conditions d'utilisation, paramètres)
-- wrape l'outil LangChain existant (`open_tutorai.tools.*`)
-- retourne un résultat markdown (image base64 pour les graphiques)
+Each method:
+- has a clear docstring for the LLM (usage conditions, parameters)
+- wraps the existing LangChain tool (`open_tutorai.tools.*`)
+- returns a markdown result (base64 image for charts)
 
 ### `backend/open_tutorai/tools/tools_registrar.py`
 
-Enregistre ou met à jour les tools OTAI dans la base Open WebUI au démarrage.
+Registers or updates OTAI tools in the Open WebUI database at startup.
 
-**Fonctions :**
+**Functions:**
 
-| Fonction | Rôle |
+| Function | Role |
 |----------|------|
-| `register_otai_tools()` | Point d'entrée — configure `DATABASE_URL` si absent, orchestre l'upsert de chaque tool |
-| `_get_admin(Users)` | Trouve dynamiquement un admin : 1) premier user créé, 2) scan des 20 premiers users, 3) n'importe quel user |
-| `_upsert_tool(...)` | Crée le tool s'il n'existe pas, le met à jour s'il existe déjà |
-| `_extract_specs(...)` | Exécute le code du tool et extrait le schéma OpenAI function calling via `get_tools_specs()` |
+| `register_otai_tools()` | Entry point — configures `DATABASE_URL` if absent, orchestrates the upsert of each tool |
+| `_get_admin(Users)` | Dynamically finds an admin: 1) first created user, 2) scan of first 20 users, 3) any user |
+| `_upsert_tool(...)` | Creates the tool if it doesn't exist, updates it if it already does |
+| `_extract_specs(...)` | Executes the tool's code and extracts the OpenAI function calling schema via `get_tools_specs()` |
 
-**Robustesse :**
-- `DATABASE_URL` configuré automatiquement depuis `DATA_DIR` si absent (évite la DB vide hors serveur)
-- Toutes les erreurs sont silencieuses — un échec n'empêche pas le démarrage
-- Upsert idempotent : relancer ne crée pas de doublons
+**Robustness:**
+- `DATABASE_URL` automatically configured from `DATA_DIR` if absent (avoids empty DB outside the server)
+- All errors are silent — a failure does not prevent startup
+- Idempotent upsert: re-running does not create duplicates
 
 ---
 
-## Fichiers modifiés
+## Modified files
 
 ### `backend/open_tutorai/main.py`
 
-Ajout dans `startup_db_client()` :
+Addition in `startup_db_client()`:
 
 ```python
-# Transmet DATA_DIR au registrar, puis enregistre les tools
+# Passes DATA_DIR to the registrar, then registers the tools
 if not os.getenv("DATA_DIR"):
     os.environ["DATA_DIR"] = os.path.abspath(".../data")
 from open_tutorai.tools.tools_registrar import register_otai_tools
@@ -91,38 +91,38 @@ register_otai_tools()
 
 ### `backend/open_tutorai/agents/helpers.py`
 
-Correction de `generate_typed_exercises()` pour les maths :
-- **Avant** : `type="math"` → `math_evaluator` pour tous les exercices maths
-- **Après** : détecte les mots de visualisation (`parabole`, `courbe`, `graphe`, `tracer`…) → `type="chart"` → `generate_chart`
+Fix in `generate_typed_exercises()` for math:
+- **Before**: `type="math"` → `math_evaluator` for all math exercises
+- **After**: detects visualization keywords (`parabola`, `curve`, `graph`, `plot`…) → `type="chart"` → `generate_chart`
 
 ### `backend/open_tutorai/agents/langgraph/prompt_builder.py`
 
-Schéma JSON de l'agent ExerciseAgent enrichi avec les **règles de sélection du type** :
+ExerciseAgent JSON schema enriched with **type selection rules**:
 ```
-type="chart"   → tracer/visualiser une courbe, parabole, fonction, timeline
-type="math"    → calculer/résoudre sans graphe
-type="coding"  → exercice de programmation
-type="dictation" → grammaire/langue
-type="mcq"     → vérification factuelle web
+type="chart"     → plot/visualize a curve, parabola, function, timeline
+type="math"      → calculate/solve without a graph
+type="coding"    → programming exercise
+type="dictation" → grammar/language
+type="mcq"       → web-based fact checking
 ```
 
 ---
 
-## Flux d'activation (une fois)
+## Activation flow (one-time)
 
-Après démarrage du serveur, dans Open WebUI :
+After starting the server, in Open WebUI:
 
-1. **Workspace → Tools** → les 4 tools OTAI apparaissent automatiquement
-2. Dans les **paramètres du modèle** → activer les tools souhaités (ou globalement)
-3. Ou dans le chat : cliquer sur `+` dans la barre de message → sélectionner le tool
+1. **Workspace → Tools** → the 4 OTAI tools appear automatically
+2. In the **model settings** → enable the desired tools (or globally)
+3. Or in the chat: click `+` in the message bar → select the tool
 
 ---
 
-## Perspectives — Vers un vrai Full Agentic
+## Outlook — Toward a true Full Agentic
 
-1. **Orchestrateur 100% LLM** — supprimer `_route()`, le LLM décide seul
-2. **Spawning de sous-agents dynamiques** — un agent délègue à un sous-agent spécialisé
-3. **Boucle réflexive autonome** — les agents se relancent sans passer par l'orchestrateur
-4. **Memory auto-update en cours de session** — écriture DB pendant le pipeline
-5. **Planning multi-étapes (ReAct / Tree-of-Thought)** — raisonnement multi-sessions
-6. **Évaluation autonome de la maîtrise** — sans delta fixe codé en dur
+1. **100% LLM orchestrator** — remove `_route()`, the LLM decides alone
+2. **Dynamic sub-agent spawning** — an agent delegates to a specialized sub-agent
+3. **Autonomous reflective loop** — agents restart without going through the orchestrator
+4. **Auto memory update during session** — DB write during the pipeline
+5. **Multi-step planning (ReAct / Tree-of-Thought)** — multi-session reasoning
+6. **Autonomous mastery evaluation** — without a fixed hardcoded delta

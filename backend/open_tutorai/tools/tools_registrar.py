@@ -69,7 +69,8 @@ def configure_otai_model_system_prompt() -> None:
     """Inject the OTAI system prompt on every model that has none configured."""
     try:
         _ensure_database_url()
-        from open_webui.models.models import Models  # noqa: PLC0415
+        from open_webui.models.models import Models, Model  # noqa: PLC0415
+        from open_webui.internal.db import get_db           # noqa: PLC0415
 
         models = Models.get_all_models()
         updated = 0
@@ -78,11 +79,16 @@ def configure_otai_model_system_prompt() -> None:
             if params.get("system", "").strip():
                 continue  # already has a system prompt — don't override
             params["system"] = _OTAI_SYSTEM_PROMPT
-            Models.update_model_by_id(model.id, {
-                "params":     params,
-                "updated_at": int(time.time()),
-            })
-            updated += 1
+            try:
+                with get_db() as db:
+                    db.query(Model).filter_by(id=model.id).update({
+                        "params":     params,
+                        "updated_at": int(time.time()),
+                    })
+                    db.commit()
+                updated += 1
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[OTAI] tools_registrar: failed to update model %s: %s", model.id, exc)
 
         if updated:
             log.info("[OTAI] tools_registrar: system prompt set on %d model(s)", updated)
