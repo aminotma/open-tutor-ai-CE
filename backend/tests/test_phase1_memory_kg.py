@@ -6,7 +6,6 @@ Uses SQLite in-memory so no real DB is needed.
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from open_webui.internal.db import Base
 
 # ── Fixture: in-memory SQLite session ────────────────────────────────────────
 

@@ -57,12 +57,17 @@ def build_graph(use_checkpointer: bool = True):
 
     # ── Checkpointer ──────────────────────────────────────────────────────────
     if use_checkpointer:
-        import sqlite3
-        Path(CHECKPOINT_DB).parent.mkdir(parents=True, exist_ok=True)
-        from langgraph.checkpoint.sqlite import SqliteSaver
-        conn = sqlite3.connect(CHECKPOINT_DB, check_same_thread=False)
-        memory = SqliteSaver(conn)
-        return workflow.compile(checkpointer=memory)
+        try:
+            import sqlite3
+            Path(CHECKPOINT_DB).parent.mkdir(parents=True, exist_ok=True)
+            from langgraph.checkpoint.sqlite import SqliteSaver
+            conn = sqlite3.connect(CHECKPOINT_DB, check_same_thread=False)
+            checkpointer = SqliteSaver(conn)
+        except (ImportError, ModuleNotFoundError):
+            # langgraph >= 1.x : SqliteSaver moved to langgraph-checkpoint-sqlite package
+            from langgraph.checkpoint.memory import MemorySaver
+            checkpointer = MemorySaver()
+        return workflow.compile(checkpointer=checkpointer)
 
     return workflow.compile()
 
